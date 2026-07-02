@@ -1,0 +1,5 @@
+output.txt
+*.o
+*.uaem
+*.txt
+CHANGELOG.md
