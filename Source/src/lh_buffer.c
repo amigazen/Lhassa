@@ -8,6 +8,8 @@
 
 #include "lh_internal.h"
 
+#include <stddef.h>
+
 struct lh_buffer_wrap {
     LhBuffer pub;
     int only_decode;
@@ -40,7 +42,8 @@ void lh_delete_buffer(LhBuffer *buf)
     if (!buf) {
         return;
     }
-    w = (struct lh_buffer_wrap *)buf;
+    /* buf points at wrap->pub, not at the start of lh_buffer_wrap */
+    w = (struct lh_buffer_wrap *)((char *)buf - offsetof(struct lh_buffer_wrap, pub));
     free(w->pub.lh_Aux);
     free(w);
 }
@@ -49,11 +52,21 @@ unsigned long lh_encode(LhBuffer *buf)
 {
     lh_status st;
     size_t out_len;
+    size_t min_dst;
     unsigned long result;
 
     if (!buf || !buf->lh_Src || !buf->lh_Dst || buf->lh_SrcSize == 0) {
         return 0;
     }
+    min_dst = (size_t)buf->lh_SrcSize + LH_ENCODE_EXTRA((size_t)buf->lh_SrcSize);
+    if ((size_t)buf->lh_DstSize < min_dst) {
+        return 0;
+    }
+    /*
+     * Classic Krekel LhEncode used lh_Aux for adaptive LZH (not ported here).
+     * Use LH0 store so LhEncode/LhDecode roundtrip stays safe on small stacks
+     * when called through lh.library from CLI clients.
+     */
     out_len = (size_t)buf->lh_DstSize;
     st = lh_compress(LH_METHOD_LH0,
         (const unsigned char *)buf->lh_Src, (size_t)buf->lh_SrcSize,
@@ -72,6 +85,9 @@ unsigned long lh_decode(LhBuffer *buf)
     size_t expected;
 
     if (!buf || !buf->lh_Src || !buf->lh_Dst || buf->lh_SrcSize == 0) {
+        return 0;
+    }
+    if (buf->lh_DstSize == 0) {
         return 0;
     }
     expected = (size_t)buf->lh_DstSize;

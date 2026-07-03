@@ -10,7 +10,6 @@
 
 #include "lh_internal.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #define LH_HDR_BUF      1024
@@ -81,24 +80,13 @@ static unsigned char lh_hdr_checksum(const unsigned char *data, size_t len)
     return sum;
 }
 
-static void lh_hdr_debug(const char *tag, FILE *fp, const lh_hdr_meta *meta, lh_status st)
+static void lh_hdr_debug(const char *tag, lh_stream *io, const lh_hdr_meta *meta, lh_status st)
 {
-    long pos;
-
-    if (!lh_debug_verbose) {
-        return;
-    }
-    pos = ftell(fp);
-    fprintf(stderr,
-        "lhassa: hdr %s st=%s pos=%ld lvl=%u %.5s packed=%lu orig=%lu name=%s\n",
-        tag,
-        lh_status_string(st),
-        pos,
-        (unsigned int)meta->header_level,
-        meta->method_sig,
-        meta->packed_size,
-        meta->original_size,
-        meta->filename ? meta->filename : "(null)");
+    (void)tag;
+    (void)io;
+    (void)meta;
+    (void)st;
+    /* Verbose header tracing is host-only; library clients use lh.library LhErr. */
 }
 
 /* lhex-style buffer walk (data[0] unused; fields start at data[1]). */
@@ -161,7 +149,7 @@ static void lh_hdr_read_base_from_buf(lh_hdr_meta *meta, unsigned char *buf)
     meta->is_directory = (meta->method == LH_METHOD_LHD);
 }
 
-static lh_status lh_hdr_skip_bytes(FILE *fp, size_t n)
+static lh_status lh_hdr_skip_bytes(lh_stream *io, size_t n)
 {
     unsigned char scratch[256];
     size_t chunk;
@@ -171,7 +159,7 @@ static lh_status lh_hdr_skip_bytes(FILE *fp, size_t n)
         if (chunk > sizeof(scratch)) {
             chunk = sizeof(scratch);
         }
-        if (fread(scratch, 1, chunk, fp) != chunk) {
+        if (lh_stream_read(io, scratch, chunk) != chunk) {
             return LH_ERR_TRUNCATED;
         }
         n -= chunk;
@@ -180,7 +168,7 @@ static lh_status lh_hdr_skip_bytes(FILE *fp, size_t n)
 }
 
 static int lh_mf_read(
-    FILE *fp,
+    lh_stream *io,
     const unsigned char *mem,
     size_t mem_len,
     size_t *mem_pos,
@@ -208,7 +196,7 @@ static int lh_mf_read(
             n -= take;
         }
         if (n > 0) {
-            if (fread(dst, 1, n, fp) != n) {
+            if (lh_stream_read(io, dst, n) != n) {
                 return 0;
             }
             dst += n;
@@ -304,7 +292,7 @@ static lh_status lh_hdr_read_extensions_buf(
 }
 
 static int lh_mf_skip(
-    FILE *fp,
+    lh_stream *io,
     const unsigned char *mem,
     size_t mem_len,
     size_t *mem_pos,
@@ -318,7 +306,7 @@ static int lh_mf_skip(
         if (chunk > sizeof(scratch)) {
             chunk = sizeof(scratch);
         }
-        if (!lh_mf_read(fp, mem, mem_len, mem_pos, scratch, chunk)) {
+        if (!lh_mf_read(io, mem, mem_len, mem_pos, scratch, chunk)) {
             return 0;
         }
         n -= chunk;
@@ -327,7 +315,7 @@ static int lh_mf_skip(
 }
 
 static lh_status lh_hdr_read_extensions(
-    FILE *fp,
+    lh_stream *io,
     lh_hdr_meta *meta,
     const unsigned char *mem,
     size_t mem_len,
@@ -354,7 +342,7 @@ static lh_status lh_hdr_read_extensions(
     }
 
     for (;;) {
-        if (!lh_mf_read(fp, mem, mem_len, &mem_pos, &blk_len, 2)) {
+        if (!lh_mf_read(io, mem, mem_len, &mem_pos, &blk_len, 2)) {
             return LH_ERR_TRUNCATED;
         }
         consumed += 2;
@@ -365,7 +353,7 @@ static lh_status lh_hdr_read_extensions(
             return LH_ERR_BAD_HEADER;
         }
         payload = (size_t)blk_len - 3u;
-        if (!lh_mf_read(fp, mem, mem_len, &mem_pos, &blk_type, 1)) {
+        if (!lh_mf_read(io, mem, mem_len, &mem_pos, &blk_type, 1)) {
             return LH_ERR_TRUNCATED;
         }
         consumed += 1;
@@ -378,7 +366,7 @@ static lh_status lh_hdr_read_extensions(
                 if (!meta->filename) {
                     return LH_ERR_NO_MEMORY;
                 }
-                if (!lh_mf_read(fp, mem, mem_len, &mem_pos, meta->filename, payload)) {
+                if (!lh_mf_read(io, mem, mem_len, &mem_pos, meta->filename, payload)) {
                     free(meta->filename);
                     meta->filename = NULL;
                     return LH_ERR_TRUNCATED;
@@ -387,11 +375,11 @@ static lh_status lh_hdr_read_extensions(
             }
         } else if (blk_type == 2) {
             if (payload >= sizeof(dirbuf)) {
-                if (!lh_mf_skip(fp, mem, mem_len, &mem_pos, payload)) {
+                if (!lh_mf_skip(io, mem, mem_len, &mem_pos, payload)) {
                     return LH_ERR_TRUNCATED;
                 }
             } else if (payload > 0) {
-                if (!lh_mf_read(fp, mem, mem_len, &mem_pos, dirbuf, payload)) {
+                if (!lh_mf_read(io, mem, mem_len, &mem_pos, dirbuf, payload)) {
                     return LH_ERR_TRUNCATED;
                 }
                 dirbuf[payload] = '\0';
@@ -408,7 +396,7 @@ static lh_status lh_hdr_read_extensions(
                 if (chunk > sizeof(scratch)) {
                     chunk = sizeof(scratch);
                 }
-                if (!lh_mf_read(fp, mem, mem_len, &mem_pos, scratch, chunk)) {
+                if (!lh_mf_read(io, mem, mem_len, &mem_pos, scratch, chunk)) {
                     return LH_ERR_TRUNCATED;
                 }
                 left -= chunk;
@@ -440,7 +428,7 @@ static lh_status lh_hdr_read_extensions(
     return LH_OK;
 }
 
-static lh_status lh_hdr_read_level2(FILE *fp, lh_hdr_meta *meta, unsigned char *buf)
+static lh_status lh_hdr_read_level2(lh_stream *io, lh_hdr_meta *meta, unsigned char *buf)
 {
     int header_size;
     unsigned long ext_total;
@@ -489,7 +477,7 @@ static lh_status lh_hdr_read_level2(FILE *fp, lh_hdr_meta *meta, unsigned char *
         return LH_ERR_BAD_HEADER;
     }
     while (padding > 0) {
-        if (fread(&pb, 1, 1, fp) != 1) {
+        if (lh_stream_read(io, &pb, 1) != 1) {
             return LH_ERR_TRUNCATED;
         }
         padding--;
@@ -500,7 +488,7 @@ static lh_status lh_hdr_read_level2(FILE *fp, lh_hdr_meta *meta, unsigned char *
     return LH_OK;
 }
 
-static lh_status lh_hdr_read_lhex(FILE *fp, lh_hdr_meta *meta, unsigned char *data)
+static lh_status lh_hdr_read_lhex(lh_stream *io, lh_hdr_meta *meta, unsigned char *data)
 {
     int header_size;
     int name_length;
@@ -603,7 +591,7 @@ static lh_status lh_hdr_read_lhex(FILE *fp, lh_hdr_meta *meta, unsigned char *da
                 if ((size_t)(ext_lim - lh_get_ptr) < (size_t)blk_len) {
                     return LH_ERR_BAD_HEADER;
                 }
-                if (fread(lh_get_ptr, 1, (size_t)blk_len, fp) != (size_t)blk_len) {
+                if (lh_stream_read(io, lh_get_ptr, (size_t)blk_len) != (size_t)blk_len) {
                     return LH_ERR_TRUNCATED;
                 }
                 switch (lh_get_byte()) {
@@ -684,7 +672,7 @@ static lh_status lh_hdr_read_lhex(FILE *fp, lh_hdr_meta *meta, unsigned char *da
     return LH_OK;
 }
 
-lh_status lh_hdr_read(FILE *fp, lh_hdr_meta *meta, unsigned char write_level)
+lh_status lh_hdr_read(lh_stream *io, lh_hdr_meta *meta, unsigned char write_level)
 {
     unsigned char buf[LH_HDR_BUF];
     unsigned char hdr_len;
@@ -695,13 +683,13 @@ lh_status lh_hdr_read(FILE *fp, lh_hdr_meta *meta, unsigned char write_level)
 
     (void)write_level;
 
-    if (!fp || !meta) {
+    if (!io || !meta) {
         return LH_ERR_INVALID_ARG;
     }
     lh_hdr_meta_clear(meta);
     memset(buf, 0, sizeof(buf));
 
-    n = fread(&hdr_len, 1, 1, fp);
+    n = lh_stream_read(io, &hdr_len, 1);
     if (n != 1) {
         return LH_ERR_TRUNCATED;
     }
@@ -722,7 +710,7 @@ lh_status lh_hdr_read(FILE *fp, lh_hdr_meta *meta, unsigned char write_level)
      * lhex/header.c: fread header_size-1, then 2-byte prefetch for level != 2.
      * The prefetch byte(s) sit between the counted header body and packed data.
      */
-    n = fread(buf + LH_I_CHECKSUM, 1, (size_t)header_size - 1u, fp);
+    n = lh_stream_read(io, buf + LH_I_CHECKSUM, (size_t)header_size - 1u);
     if (n != (size_t)header_size - 1u) {
         return LH_ERR_TRUNCATED;
     }
@@ -737,12 +725,13 @@ lh_status lh_hdr_read(FILE *fp, lh_hdr_meta *meta, unsigned char write_level)
             return LH_ERR_BAD_HEADER;
         }
         if (header_size > initial_size) {
-            n = fread(buf + initial_size, 1, (size_t)header_size - (size_t)initial_size, fp);
+            n = lh_stream_read(io, buf + initial_size,
+                (size_t)header_size - (size_t)initial_size);
             if (n != (size_t)header_size - (size_t)initial_size) {
                 return LH_ERR_TRUNCATED;
             }
         }
-    } else if (fread(buf + header_size, 1, 2, fp) != 2) {
+    } else if (lh_stream_read(io, buf + header_size, 2) != 2) {
         return LH_ERR_TRUNCATED;
     }
 
@@ -751,17 +740,17 @@ lh_status lh_hdr_read(FILE *fp, lh_hdr_meta *meta, unsigned char write_level)
     }
 
     if (header_level == 2) {
-        st = lh_hdr_read_level2(fp, meta, buf);
-        lh_hdr_debug("read", fp, meta, st);
+        st = lh_hdr_read_level2(io, meta, buf);
+        lh_hdr_debug("read", io, meta, st);
         return st;
     }
 
-    st = lh_hdr_read_lhex(fp, meta, buf);
-    lh_hdr_debug("read", fp, meta, st);
+    st = lh_hdr_read_lhex(io, meta, buf);
+    lh_hdr_debug("read", io, meta, st);
     return st;
 }
 
-lh_status lh_hdr_write(FILE *fp, const lh_hdr_meta *meta, unsigned char write_level)
+lh_status lh_hdr_write(lh_stream *io, const lh_hdr_meta *meta, unsigned char write_level)
 {
     unsigned char buf[260];
     size_t name_len;
@@ -769,7 +758,7 @@ lh_status lh_hdr_write(FILE *fp, const lh_hdr_meta *meta, unsigned char write_le
     unsigned char checksum;
     size_t i;
 
-    if (!fp || !meta || !meta->filename) {
+    if (!io || !LH_STREAM_OPEN(io) || !meta || !meta->filename) {
         return LH_ERR_INVALID_ARG;
     }
     name_len = strlen(meta->filename);
@@ -803,18 +792,18 @@ lh_status lh_hdr_write(FILE *fp, const lh_hdr_meta *meta, unsigned char write_le
     }
     buf[1] = checksum;
     /* lhex wire format: size, body[0..size-2], then 2 extension/prefetch bytes. */
-    if (fwrite(buf, 1, 1, fp) != 1) {
+    if (lh_stream_write(io, buf, 1) != 1) {
         return LH_ERR_IO;
     }
-    if (fwrite(buf + 1, 1, hdr_body - 1, fp) != hdr_body - 1) {
+    if (lh_stream_write(io, buf + 1, hdr_body - 1) != hdr_body - 1) {
         return LH_ERR_IO;
     }
-    if (fwrite(buf + hdr_body, 1, 2, fp) != 2) {
+    if (lh_stream_write(io, buf + hdr_body, 2) != 2) {
         return LH_ERR_IO;
     }
     if (write_level >= 2) {
         /* Terminate extension chain (level-2 readers expect this word). */
-        if (fwrite("\0\0", 1, 2, fp) != 2) {
+        if (lh_stream_write(io, "\0\0", 2) != 2) {
             return LH_ERR_IO;
         }
     }

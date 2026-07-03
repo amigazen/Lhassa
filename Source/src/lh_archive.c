@@ -8,32 +8,26 @@
 
 #include "lh_internal.h"
 
-#ifdef HOST
+#if !defined(LH_AMIGA) && !defined(LH_HOST)
+#error "lh_archive.c: set LH_AMIGA (library) or LH_HOST (make HOST=1)"
+#endif
+
+#ifdef LH_HOST
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
 
-#ifndef HOST
-#include <exec/types.h>
+#ifdef LH_AMIGA
+#define __USE_SYSBASE
 #include <exec/memory.h>
-#include <dos/dos.h>
+#include <proto/exec.h>
 #include <proto/dos.h>
 
-#ifndef TICKS_PER_SECOND
-#define LH_TPS 50
-#else
-#define LH_TPS TICKS_PER_SECOND
-#endif
-
-/* AmigaDOS DateStamp epoch is 1978-01-01; offset from Unix epoch in seconds. */
-#define LH_AMIGA_EPOCH_SEC ((8UL * 365UL + 2UL) * 86400UL)
-
-/* Lock+Examine: vbcc POSIX stat/fstat do not resolve ///assign paths. */
+/* Lock+Examine via dos.library (native paths). */
 static int lh_capture_mtime_amiga(const char *path, lh_datetime *dt)
 {
     BPTR lock;
     struct FileInfoBlock *fib;
-    unsigned long secs;
     int ok;
 
     ok = 0;
@@ -51,11 +45,7 @@ static int lh_capture_mtime_amiga(const char *path, lh_datetime *dt)
         return 0;
     }
     if (Examine(lock, fib)) {
-        secs = (unsigned long)fib->fib_Date.ds_Days * 86400UL;
-        secs += (unsigned long)fib->fib_Date.ds_Minute * 60UL;
-        secs += (unsigned long)fib->fib_Date.ds_Tick / (unsigned long)LH_TPS;
-        secs += LH_AMIGA_EPOCH_SEC;
-        lh_datetime_from_time_t(dt, (long)secs);
+        lh_datetime_from_datestamp(&fib->fib_Date, dt);
         ok = 1;
     }
     FreeMem((APTR)fib, (long)sizeof(struct FileInfoBlock));
@@ -64,14 +54,276 @@ static int lh_capture_mtime_amiga(const char *path, lh_datetime *dt)
 }
 #endif
 
-struct lh_writer {
+void lh_stream_init(lh_stream *s)
+{
+    if (!s) {
+        return;
+    }
+#ifdef LH_AMIGA
+    s->lh_fh = 0;
+#elif defined(LH_HOST)
+    s->lh_fp = NULL;
+#endif
+}
+
+int lh_stream_open_read(lh_stream *s, const char *path)
+{
+    if (!s || !path) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    s->lh_fh = Open((STRPTR)path, MODE_OLDFILE);
+    return s->lh_fh != 0;
+#elif defined(LH_HOST)
+    s->lh_fp = fopen(path, "rb");
+    return s->lh_fp != NULL;
+#else
+    return 0;
+#endif
+}
+
+void lh_stream_close(lh_stream *s)
+{
+    if (!s) {
+        return;
+    }
+#ifdef LH_AMIGA
+    if (s->lh_fh) {
+        Close(s->lh_fh);
+        s->lh_fh = 0;
+    }
+#elif defined(LH_HOST)
+    if (s->lh_fp) {
+        fclose(s->lh_fp);
+        s->lh_fp = NULL;
+    }
+#endif
+}
+
+size_t lh_stream_read(lh_stream *s, void *buf, size_t n)
+{
+#ifdef LH_AMIGA
+    LONG got;
+#endif
+
+    if (!s || !buf || n == 0) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    if (!s->lh_fh) {
+        return 0;
+    }
+    got = Read(s->lh_fh, buf, (LONG)n);
+    if (got < 0) {
+        return 0;
+    }
+    return (size_t)got;
+#elif defined(LH_HOST)
+    if (!s->lh_fp) {
+        return 0;
+    }
+    return fread(buf, 1, n, s->lh_fp);
+#else
+    return 0;
+#endif
+}
+
+int lh_stream_seek_cur(lh_stream *s, long delta)
+{
+    if (!s) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    if (!s->lh_fh) {
+        return 0;
+    }
+    /* Seek(fh, position, mode) per dos.doc */
+    return Seek(s->lh_fh, (LONG)delta, OFFSET_CURRENT) != -1L;
+#elif defined(LH_HOST)
+    if (!s->lh_fp) {
+        return 0;
+    }
+    return fseek(s->lh_fp, delta, SEEK_CUR) == 0;
+#else
+    return 0;
+#endif
+}
+
+long lh_stream_tell(lh_stream *s)
+{
+    if (!s) {
+        return -1L;
+    }
+#ifdef LH_AMIGA
+    if (!s->lh_fh) {
+        return -1L;
+    }
+    return Seek(s->lh_fh, 0L, OFFSET_CURRENT);
+#elif defined(LH_HOST)
+    if (!s->lh_fp) {
+        return -1L;
+    }
+    return ftell(s->lh_fp);
+#else
+    return -1L;
+#endif
+}
+
+int lh_stream_open_write(lh_stream *s, const char *path)
+{
+#ifdef LH_AMIGA
+    BPTR fh;
+    LONG ioerr;
+    int retry;
+#endif
+
+#ifdef LH_AMIGA
+    char aside[560];
+    LONG plen;
+#endif
+
+    if (!s || !path) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    for (retry = 0; retry < 4; retry++) {
+        SetIoErr(0);
+        fh = Open((STRPTR)path, MODE_OLDFILE);
+        if (fh != (BPTR)NULL) {
+            Close(fh);
+        }
+        DeleteFile((STRPTR)path);
+        SetIoErr(0);
+        s->lh_fh = Open((STRPTR)path, MODE_NEWFILE);
+        if (s->lh_fh != (BPTR)NULL) {
+            SetIoErr(0);
+            return 1;
+        }
+        ioerr = IoErr();
+        if (ioerr != ERROR_OBJECT_EXISTS) {
+            break;
+        }
+    }
+    plen = (LONG)strlen(path);
+    if (plen > 0 && plen < (LONG)sizeof(aside) - 4) {
+        strcpy(aside, path);
+        strcat(aside, ".$$");
+        SetIoErr(0);
+        fh = Open((STRPTR)path, MODE_OLDFILE);
+        if (fh != (BPTR)NULL) {
+            Close(fh);
+        }
+        if (Rename((STRPTR)path, (STRPTR)aside)) {
+            DeleteFile((STRPTR)aside);
+        }
+        SetIoErr(0);
+        s->lh_fh = Open((STRPTR)path, MODE_NEWFILE);
+        if (s->lh_fh != (BPTR)NULL) {
+            SetIoErr(0);
+            return 1;
+        }
+    }
+    return 0;
+#elif defined(LH_HOST)
+    (void)unlink(path);
+    s->lh_fp = fopen(path, "wb");
+    return s->lh_fp != NULL;
+#else
+    return 0;
+#endif
+}
+
+int lh_stream_open_append(lh_stream *s, const char *path)
+{
+    if (!s || !path) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    s->lh_fh = Open((STRPTR)path, MODE_OLDFILE);
+    if (!s->lh_fh) {
+        return 0;
+    }
+    if (Seek(s->lh_fh, 0L, OFFSET_END) == -1L) {
+        Close(s->lh_fh);
+        s->lh_fh = 0;
+        return 0;
+    }
+    return 1;
+#elif defined(LH_HOST)
+    s->lh_fp = fopen(path, "ab");
+    return s->lh_fp != NULL;
+#else
+    return 0;
+#endif
+}
+
+int lh_stream_file_exists(const char *path)
+{
+#ifdef LH_AMIGA
+    BPTR fh;
+
+    if (!path) {
+        return 0;
+    }
+    fh = Open((STRPTR)path, MODE_OLDFILE);
+    if (!fh) {
+        return 0;
+    }
+    Close(fh);
+    return 1;
+#elif defined(LH_HOST)
     FILE *fp;
+
+    if (!path) {
+        return 0;
+    }
+    fp = fopen(path, "rb");
+    if (!fp) {
+        return 0;
+    }
+    fclose(fp);
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+size_t lh_stream_write(lh_stream *s, const void *buf, size_t n)
+{
+#ifdef LH_AMIGA
+    LONG wrote;
+#endif
+
+    if (!s || !buf || n == 0) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    if (!s->lh_fh) {
+        return 0;
+    }
+    wrote = Write(s->lh_fh, (APTR)buf, (LONG)n);
+    if (wrote < 0) {
+        return 0;
+    }
+    return (size_t)wrote;
+#elif defined(LH_HOST)
+    if (!s->lh_fp) {
+        return 0;
+    }
+    return fwrite(buf, 1, n, s->lh_fp);
+#else
+    return 0;
+#endif
+}
+
+struct lh_writer {
+    lh_stream io;
     unsigned char header_level;
     lh_level default_level;
 };
 
 struct lh_reader {
-    FILE *fp;
+    lh_stream io;
     char password[256];
     int has_password;
     int header_only;
@@ -92,15 +344,15 @@ static void lh_reader_capture_mtime(lh_reader *r, const char *path)
         return;
     }
     r->has_archive_dt = 0;
-#ifndef HOST
+#ifdef LH_AMIGA
     if (path && lh_capture_mtime_amiga(path, &r->archive_dt)) {
         r->has_archive_dt = 1;
     }
-#else
+#elif defined(LH_HOST)
     {
         struct stat st;
 
-        if (r->fp && fstat(fileno(r->fp), &st) == 0) {
+        if (r->io.lh_fp && fstat(fileno(r->io.lh_fp), &st) == 0) {
             lh_datetime_from_time_t(&r->archive_dt, (long)st.st_mtime);
             r->has_archive_dt = 1;
             return;
@@ -189,8 +441,8 @@ lh_writer *lh_writer_open(const char *path, unsigned char header_level,
         }
         return NULL;
     }
-    w->fp = fopen(path, "wb");
-    if (!w->fp) {
+    lh_stream_init(&w->io);
+    if (!lh_stream_open_write(&w->io, path)) {
         free(w);
         if (err) {
             *err = LH_ERR_IO;
@@ -208,11 +460,8 @@ lh_writer *lh_writer_open(const char *path, unsigned char header_level,
 lh_writer *lh_writer_open_append(const char *path, lh_status *err)
 {
     lh_writer *w;
-    FILE *test;
 
-    test = fopen(path, "rb");
-    if (test) {
-        fclose(test);
+    if (lh_stream_file_exists(path)) {
         w = (lh_writer *)calloc(1, sizeof(*w));
         if (!w) {
             if (err) {
@@ -220,22 +469,22 @@ lh_writer *lh_writer_open_append(const char *path, lh_status *err)
             }
             return NULL;
         }
-        w->fp = fopen(path, "ab");
-        if (!w->fp) {
+        lh_stream_init(&w->io);
+        if (!lh_stream_open_append(&w->io, path)) {
             free(w);
             if (err) {
                 *err = LH_ERR_IO;
             }
             return NULL;
         }
-        w->header_level = 2;
+        w->header_level = 1;
         w->default_level = LH_LEVEL_LH5;
         if (err) {
             *err = LH_OK;
         }
         return w;
     }
-    return lh_writer_open(path, 2, LH_LEVEL_LH5, err);
+    return lh_writer_open(path, 1, LH_LEVEL_LH5, err);
 }
 
 lh_status lh_writer_add(
@@ -261,7 +510,7 @@ lh_status lh_writer_add(
 
     (void)comment;
 
-    if (!w || !w->fp || !filename) {
+    if (!w || !LH_STREAM_OPEN(&w->io) || !filename) {
         return LH_ERR_INVALID_ARG;
     }
     memset(&meta, 0, sizeof(meta));
@@ -281,7 +530,8 @@ lh_status lh_writer_add(
         meta.timestamp = ts;
     } else {
         lh_datetime now;
-        lh_datetime_from_time_t(&now, (long)time(NULL));
+
+        lh_datetime_now(&now);
         meta.timestamp = lh_dos_timestamp_pack(&now);
     }
     if (data_len == 0 || method == LH_METHOD_LHD) {
@@ -305,12 +555,12 @@ lh_status lh_writer_add(
         meta.packed_size = (unsigned long)packed_len;
         meta.crc = lh_crc16(data, data_len);
         meta.has_crc = 1;
-        st = lh_hdr_write(w->fp, &meta, w->header_level);
+        st = lh_hdr_write(&w->io, &meta, w->header_level);
         if (st != LH_OK) {
             free(packed);
             return st;
         }
-        if (packed_len > 0 && fwrite(packed, 1, packed_len, w->fp) != packed_len) {
+        if (packed_len > 0 && lh_stream_write(&w->io, packed, packed_len) != packed_len) {
             free(packed);
             return LH_ERR_IO;
         }
@@ -318,7 +568,7 @@ lh_status lh_writer_add(
         return LH_OK;
     }
     meta.crc = 0;
-    st = lh_hdr_write(w->fp, &meta, w->header_level);
+    st = lh_hdr_write(&w->io, &meta, w->header_level);
     return st;
 }
 
@@ -327,9 +577,7 @@ lh_status lh_writer_close(lh_writer **w)
     if (!w || !*w) {
         return LH_ERR_INVALID_ARG;
     }
-    if ((*w)->fp) {
-        fclose((*w)->fp);
-    }
+    lh_stream_close(&(*w)->io);
     free(*w);
     *w = NULL;
     return LH_OK;
@@ -352,8 +600,8 @@ lh_reader *lh_reader_open(const char *path, lh_status *err)
         }
         return NULL;
     }
-    r->fp = fopen(path, "rb");
-    if (!r->fp) {
+    lh_stream_init(&r->io);
+    if (!lh_stream_open_read(&r->io, path)) {
         free(r);
         if (err) {
             *err = LH_ERR_IO;
@@ -439,7 +687,7 @@ lh_status lh_reader_next(lh_reader *r, lh_entry *entry)
         return LH_OK;
     }
     memset(&meta, 0, sizeof(meta));
-    st = lh_hdr_read(r->fp, &meta, 0);
+    st = lh_hdr_read(&r->io, &meta, 0);
     if (st == LH_ERR_TRUNCATED) {
         r->eof = 1;
         entry->filename = NULL;
@@ -452,12 +700,27 @@ lh_status lh_reader_next(lh_reader *r, lh_entry *entry)
     if (r->on_begin && entry->filename) {
         r->on_begin(r->progress_ctx, entry->filename, entry->data_len);
     }
-    if (meta.packed_size == 0 || meta.is_directory) {
+    if (meta.is_directory) {
         lh_hdr_meta_clear(&meta);
         return LH_OK;
     }
+    /*
+     * lh_meta_to_entry() already copied original_size into entry->data_len.
+     * Only an empty stored file (original_size==0) has no payload after the
+     * header.  packed_size==0 with original_size>0 is never valid LHA; treat
+     * it as a header parse error instead of returning OK with no data buffer.
+     */
+    if (meta.original_size == 0) {
+        lh_hdr_meta_clear(&meta);
+        return LH_OK;
+    }
+    if (meta.packed_size == 0) {
+        lh_hdr_meta_clear(&meta);
+        lh_entry_clear(entry);
+        return LH_ERR_BAD_HEADER;
+    }
     if (r->header_only) {
-        if (fseek(r->fp, (long)meta.packed_size, SEEK_CUR) != 0) {
+        if (!lh_stream_seek_cur(&r->io, (long)meta.packed_size)) {
             lh_hdr_meta_clear(&meta);
             lh_entry_clear(entry);
             return LH_ERR_IO;
@@ -472,7 +735,7 @@ lh_status lh_reader_next(lh_reader *r, lh_entry *entry)
         lh_entry_clear(entry);
         return LH_ERR_NO_MEMORY;
     }
-    n = fread(packed, 1, meta.packed_size, r->fp);
+    n = lh_stream_read(&r->io, packed, meta.packed_size);
     if (n != meta.packed_size) {
         free(packed);
         lh_hdr_meta_clear(&meta);
@@ -518,9 +781,85 @@ void lh_reader_close(lh_reader **r)
     if (!r || !*r) {
         return;
     }
-    if ((*r)->fp) {
-        fclose((*r)->fp);
-    }
+    lh_stream_close(&(*r)->io);
     free(*r);
     *r = NULL;
+}
+
+lh_status lh_archive_rewrite(
+    const char *archive,
+    lh_keep_fn keep,
+    void *ctx,
+    unsigned char header_level,
+    lh_level level,
+    int store_only
+)
+{
+    char temp[512];
+    lh_reader *r;
+    lh_writer *w;
+    lh_entry entry;
+    lh_status st;
+    lh_status err;
+
+    if (!archive || !keep) {
+        return LH_ERR_INVALID_ARG;
+    }
+    strncpy(temp, archive, sizeof(temp) - 6);
+    temp[sizeof(temp) - 6] = '\0';
+    strcat(temp, ".$$$");
+
+    r = lh_reader_open(archive, &err);
+    if (!r) {
+        return err;
+    }
+    w = lh_writer_open(temp, header_level, level, &err);
+    if (!w) {
+        lh_reader_close(&r);
+        return err;
+    }
+    for (;;) {
+        memset(&entry, 0, sizeof(entry));
+        st = lh_reader_next(r, &entry);
+        if (st == LH_OK && !entry.filename) {
+            break;
+        }
+        if (st != LH_OK) {
+            lh_entry_clear(&entry);
+            break;
+        }
+        if (keep(&entry, ctx)) {
+            st = lh_writer_add(w, entry.filename, entry.comment, entry.attrs,
+                &entry.datetime, level, store_only,
+                entry.data, entry.data_len);
+            lh_entry_clear(&entry);
+            if (st != LH_OK) {
+                break;
+            }
+        } else {
+            lh_entry_clear(&entry);
+        }
+    }
+    lh_reader_close(&r);
+    lh_writer_close(&w);
+    if (st != LH_OK && st != LH_ERR_TRUNCATED) {
+#ifdef LH_AMIGA
+        DeleteFile((STRPTR)temp);
+#elif defined(LH_HOST)
+        remove(temp);
+#endif
+        return st;
+    }
+#ifdef LH_AMIGA
+    DeleteFile((STRPTR)archive);
+    if (Rename((STRPTR)temp, (STRPTR)archive) == DOSFALSE) {
+        return LH_ERR_IO;
+    }
+#elif defined(LH_HOST)
+    remove(archive);
+    if (rename(temp, archive) != 0) {
+        return LH_ERR_IO;
+    }
+#endif
+    return LH_OK;
 }

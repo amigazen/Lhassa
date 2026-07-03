@@ -178,6 +178,17 @@ lh_status lh_reader_next(lh_reader *r, lh_entry *entry);
 void lh_reader_close(lh_reader **r);
 void lh_entry_clear(lh_entry *entry);
 
+typedef int (*lh_keep_fn)(const lh_entry *entry, void *ctx);
+
+lh_status lh_archive_rewrite(
+    const char *archive,
+    lh_keep_fn keep,
+    void *ctx,
+    unsigned char header_level,
+    lh_level level,
+    int store_only
+);
+
 /* --- low-level codec --- */
 
 lh_status lh_compress(

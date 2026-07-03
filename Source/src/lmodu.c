@@ -2,17 +2,10 @@
  * SPDX-License-Identifier: BSD-2-Clause
  * Copyright 2026 amigazen project
  *
- * VBCC 68000 runtime helpers __lmodu / __lmods for 32-bit modulo when the
- * CPU has no div.l (68000/68010).  Implemented with utility.library
- * UDivMod32 / SDivMod32 (V36): quotient in D0, remainder in D1.
- *
- * C prototypes only return D0, so remainder is reconstructed as
- * dividend - quotient * divisor (see clib/utility_protos.h).
- *
- * vbcc references __lmodu at link time; define _lmodu in C (one leading _).
- *
- * https://developer.amigaos3.net/autodocs/utility.library/UDivMod32.html
+ * VBCC 68000 div helpers for codec (Makefile vbcc build only, not lh.library).
  */
+
+#ifndef HOST
 
 #include <exec/types.h>
 #include <stdlib.h>
@@ -85,3 +78,5 @@ _lmods(long dividend, long divisor)
     result = dividend - SMult32(quotient, divisor);
     return result;
 }
+
+#endif /* HOST */

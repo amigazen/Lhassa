@@ -799,6 +799,9 @@ long lh_compress_lh5(void * inBuf, unsigned long inSize, void * outBuf, unsigned
             codeLookup[i].freq = 1;
         }
     }
+    if (totalFreq == 0) {
+        totalFreq = 1;
+    }
     
     /* Simple length calculation based on frequencies */
     for (i = 0; i < NUM_CODES; i++) {
@@ -820,6 +823,9 @@ long lh_compress_lh5(void * inBuf, unsigned long inSize, void * outBuf, unsigned
         if (distLookup[i].freq == 0) {
             distLookup[i].freq = 1;
         }
+    }
+    if (totalFreq == 0) {
+        totalFreq = 1;
     }
     
     /* Simple length calculation for distances */
@@ -1376,6 +1382,9 @@ long lh_compress_lh6(void * inBuf, unsigned long inSize, void * outBuf, unsigned
             codeLookup[i].freq = 1;
         }
     }
+    if (totalFreq == 0) {
+        totalFreq = 1;
+    }
     
     /* Simple length calculation based on frequencies */
     for (i = 0; i < NUM_CODES; i++) {
@@ -1397,6 +1406,9 @@ long lh_compress_lh6(void * inBuf, unsigned long inSize, void * outBuf, unsigned
         if (distLookup[i].freq == 0) {
             distLookup[i].freq = 1;
         }
+    }
+    if (totalFreq == 0) {
+        totalFreq = 1;
     }
     
     /* Simple length calculation for distances */
@@ -1972,6 +1984,9 @@ long lh_compress_lh7(void * inBuf, unsigned long inSize, void * outBuf, unsigned
                 codeLookup[i].freq = 1;
             }
         }
+        if (totalFreq == 0) {
+            totalFreq = 1;
+        }
         
         /* Calculate code lengths */
         for (i = 0; i < NUM_CODES; i++) {
@@ -1992,6 +2007,9 @@ long lh_compress_lh7(void * inBuf, unsigned long inSize, void * outBuf, unsigned
             if (distCodeLookup[i].freq == 0) {
                 distCodeLookup[i].freq = 1;
             }
+        }
+        if (totalFreq == 0) {
+            totalFreq = 1;
         }
         
         for (i = 0; i < OFFSET_BITS; i++) {

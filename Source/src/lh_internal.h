@@ -9,12 +9,35 @@
 #ifndef LH_INTERNAL_H
 #define LH_INTERNAL_H
 
+#include "lh_platform.h"
+#include <string.h>
+
+#ifdef LH_AMIGA
+#include "/include/lh.h"
+#else
+#include "lh.h"
+#endif
+
+#ifdef LH_AMIGA
+#ifndef EXEC_TYPES_H
+#include <exec/types.h>
+#endif
+#ifndef DOS_DOS_H
+#include <dos/dos.h>
+#endif
+
+/* Pooled allocator from lib_source/malloc.c (not libc). */
+void *malloc(size_t size);
+void free(void *ptr);
+void *calloc(size_t num, size_t size);
+void *realloc(void *ptr, size_t size);
+#elif defined(LH_HOST)
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <time.h>
-
-#include "../include/lh.h"
+#else
+#error "lh core: LH_AMIGA (library) or LH_HOST (make HOST=1) required"
+#endif
 
 typedef unsigned char lh_u8;
 typedef unsigned short lh_u16;
@@ -99,6 +122,10 @@ void lh_decrypt_buffer(lh_decrypt_state *st, unsigned char *buf, size_t len);
 
 /* Datetime */
 unsigned long lh_dos_timestamp_pack(const lh_datetime *dt);
+void lh_datetime_now(lh_datetime *dt);
+#ifdef LH_AMIGA
+void lh_datetime_from_datestamp(const struct DateStamp *ds, lh_datetime *dt);
+#endif
 
 /* Codec internals */
 void lh_init_decompress_state(
@@ -152,9 +179,6 @@ long lh_compress_lz5(void *, unsigned long, void *, unsigned long *);
 long lh_decompress_lz4(void *, unsigned long, void *, unsigned long);
 long lh_compress_lz4(void *, unsigned long, void *, unsigned long *);
 
-/* vbcc 68000 runtime: close utility.library opened by src/lmodu.c */
-void lh_utility_shutdown(void);
-
 /* Secret CLI debug (-v): header/position tracing on stderr. */
 extern int lh_debug_verbose;
 void lh_set_debug_verbose(int on);
@@ -177,9 +201,41 @@ typedef struct lh_hdr_meta {
 } lh_hdr_meta;
 
 void lh_hdr_meta_clear(lh_hdr_meta *m);
-lh_status lh_hdr_read(FILE *fp, lh_hdr_meta *meta, unsigned char write_level);
+
+/*
+ * lh_stream - dos.library file I/O (Open/Read/Write/Seek/Close per dos.doc).
+ */
+typedef struct lh_stream lh_stream;
+
+struct lh_stream {
+#ifdef LH_AMIGA
+    BPTR lh_fh;
+#elif defined(LH_HOST)
+    FILE *lh_fp;
+#endif
+};
+
+void lh_stream_init(lh_stream *s);
+
+#ifdef LH_AMIGA
+#define LH_STREAM_OPEN(s) ((s)->lh_fh != 0)
+#elif defined(LH_HOST)
+#define LH_STREAM_OPEN(s) ((s)->lh_fp != NULL)
+#endif
+
+int lh_stream_open_read(lh_stream *s, const char *path);
+int lh_stream_open_write(lh_stream *s, const char *path);
+int lh_stream_open_append(lh_stream *s, const char *path);
+int lh_stream_file_exists(const char *path);
+void lh_stream_close(lh_stream *s);
+size_t lh_stream_read(lh_stream *s, void *buf, size_t n);
+size_t lh_stream_write(lh_stream *s, const void *buf, size_t n);
+int lh_stream_seek_cur(lh_stream *s, long delta);
+long lh_stream_tell(lh_stream *s);
+
+lh_status lh_hdr_read(lh_stream *io, lh_hdr_meta *meta, unsigned char write_level);
 lh_status lh_hdr_write(
-    FILE *fp,
+    lh_stream *io,
     const lh_hdr_meta *meta,
     unsigned char write_level
 );
