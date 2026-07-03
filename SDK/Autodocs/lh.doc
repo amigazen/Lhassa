@@ -1,0 +1,1183 @@
+TABLE OF CONTENTS
+
+lh.library/background
+lh.library/errors
+lh.library/constants
+lh.library/CreateBuffer
+lh.library/DeleteBuffer
+lh.library/LhEncode
+lh.library/LhDecode
+lh.library/LhCompress
+lh.library/LhDecompress
+lh.library/LhOpenArchive
+lh.library/LhCloseArchive
+lh.library/LhLock
+lh.library/LhUnLock
+lh.library/LhExamine
+lh.library/LhExNext
+lh.library/LhExAll
+lh.library/LhExAllEnd
+lh.library/LhInfo
+lh.library/LhOpenFromLock
+lh.library/LhOpen
+lh.library/LhRead
+lh.library/LhWrite
+lh.library/LhClose
+lh.library/LhSeek
+lh.library/LhNameFromLock
+lh.library/LhAddEntry
+lh.library/LhDeleteFile
+lh.library/LhConcatArchive
+lh.library/LhSetPassword
+lh.library/LhReadData
+lh.library/LhExtractEntry
+lh.library/LhTestEntry
+lh.library/LhPrintEntry
+lh.library/LhErr
+lh.library/background                                 lh.library/background
+
+   PURPOSE
+
+   lh.library provides LHA archive compression, decompression, and archive
+   container access for Amiga.  It replaces the classic 1990 lh.library
+   with a full LHA engine (lh0-lh7, lzs, lz4, lz5) while retaining the
+   original four buffer functions at the same LVO offsets for binary
+   compatibility and legacy preservation.
+
+   Version 2 adds a DOS.library-style archive API: LhArchive objects act as
+   volume roots, LhLock/LhExamine/LhExNext traverse entries like directories,
+   and LhOpenFromLock/LhRead/LhClose read decompressed file data.
+
+   BOOTSTRAP
+
+   LhBase = OpenLibrary("lh.library", 2L);
+
+   No separate init or shutdown LVO is required.  Internal allocations use
+   a pooled Exec memory arena freed when the library expunges.
+
+   LINKING TIERS
+
+   Tier 0 -- lh.library + <proto/lh.h>  (preferred)
+     Shared library; use <libraries/lhlib.h> for public types and constants.
+
+   Tier 1 -- lh.lib static core
+     Codec and buffer API only, linked into one executable.
+
+   TYPICAL TIER 0 FLOW (buffer encode/decode)
+
+   LhBase = OpenLibrary("lh.library", 2L);
+   buf = CreateBuffer(FALSE);
+   buf->lh_Src = plain; buf->lh_SrcSize = plain_len;
+   buf->lh_Dst = comp;  buf->lh_DstSize = sizeof(comp);
+   n = LhEncode(buf);
+   buf->lh_Src = comp; buf->lh_SrcSize = n;
+   buf->lh_Dst = back; buf->lh_DstSize = plain_len;
+   LhDecode(buf);
+   DeleteBuffer(buf);
+   CloseLibrary(LhBase);
+
+   TYPICAL TIER 0 FLOW (archive read)
+
+   arc = LhOpenArchive("RAM:Archive.lha", LHARC_MODE_READ);
+   lock = LhLock(arc, "");
+   LhExamine(lock, fib);
+   while (LhExNext(lock, fib)) { /* list entries */ }
+   LhUnLock(lock);
+   LhCloseArchive(arc);
+
+   OWNERSHIP AND LIFETIME
+
+   - CreateBuffer returns an LhBuffer; always free it with DeleteBuffer.
+   - Do not allocate struct LhBuffer yourself.
+   - LhOpenArchive returns an opaque LhArchive; close with LhCloseArchive.
+   - Locks from LhLock are not dos.library locks; free them with LhUnLock.
+   - LhOpenFromLock does not take ownership of the lock; the caller still
+     LhUnLock()s after LhClose().  LhOpen creates an internal lock that
+     LhClose frees.
+   - LhReadData returns an AllocMem buffer; the caller FreeMem()s it.
+
+   ERROR MODEL
+
+   Archive LVOs set a library-local error code retrieved with LhErr().
+   Codes are dos.library IoErr-style values (ERROR_OBJECT_NOT_FOUND,
+   ERROR_NO_MORE_ENTRIES, etc.).  Buffer LVOs return 0 on failure.
+   See lh.library/errors.
+
+   INCLUDE FILES
+
+   #include <libraries/lhlib.h>
+   #include <proto/lh.h>
+
+   SEE ALSO
+       lh.library/errors, lh.library/constants, SDK/Examples/LhTest.c
+lh.library/errors                                     lh.library/errors
+
+   GENERAL INFORMATION
+
+   Classic buffer LVOs (CreateBuffer, LhEncode, LhDecode, LhCompress,
+   LhDecompress) return NULL or 0 on failure and do not update LhErr().
+
+   Archive LVOs store a dos.library-style error code in the library base.
+   Call LhErr() after a failed call, similar to dos.library/IoErr.
+
+   COMMON CODES
+
+   ERROR_OBJECT_NOT_FOUND (205)
+       Archive path or entry name not found.
+
+   ERROR_OBJECT_EXISTS (203)
+       May appear as a stale IoErr after path-removal retries.
+
+   ERROR_NO_FREE_STORE (103)
+       Memory allocation failed.
+
+   ERROR_NO_MORE_ENTRIES (232)
+       LhExAll finished the catalog (normal completion).
+
+   ERROR_READ_PROTECTED (224)
+       Archive open/catalog parse failed (not necessarily DOS protection).
+
+   ERROR_WRITE_PROTECTED (223)
+       Archive write, add, delete, or rewrite failed.
+
+   ERROR_OBJECT_WRONG_TYPE (212)
+       Lock or handle used with the wrong operation.
+
+   ERROR_INVALID_COMPONENT_NAME (210)
+       NULL or empty path/name argument.
+
+   ERROR_LINE_TOO_LONG (120)
+       LhExAll buffer too small for the next record.
+
+   ERROR_BAD_NUMBER (115)
+       LhExAll Type not in ED_NAME..ED_COMMENT.
+
+   SEE ALSO
+       LhErr(), dos.library/IoErr, lh.library/background
+lh.library/constants                                  lh.library/constants
+
+   GENERAL INFORMATION
+
+   Constants and types are defined in <libraries/lhlib.h>.
+
+   LIBRARY
+
+   LH_NAME           "lh.library"
+   LH_VERSION        2
+   LH_MIN_VERSION    2
+   ENCODEEXTRA(n)    (((n) + 7) >> 3)  -- extra bytes for LhEncode dest
+
+   ARCHIVE MODES (LhOpenArchive)
+
+   LHARC_MODE_READ    MODE_OLDFILE  -- open existing archive for read
+   LHARC_MODE_WRITE   MODE_NEWFILE  -- create/truncate archive for write
+   LHARC_MODE_APPEND  1007L         -- append entries to existing archive
+
+   BUFFER (struct LhBuffer)
+
+   lh_Src / lh_SrcSize   -- input buffer and length
+   lh_Dst / lh_DstSize   -- output buffer and capacity (updated on success)
+   lh_Aux / lh_AuxSize   -- internal work area (set by CreateBuffer)
+   lh_Reserved           -- reserved; leave zero
+
+   CODEC METHODS (LhCompress / LhDecompress)
+
+   Method numbers match the LHA method table (0 = lh0/store, 5 = lh5, ...).
+   See <lh.h> LH_METHOD_* when linking the static core.
+
+   SEE ALSO
+       lh.library/background, CreateBuffer(), LhOpenArchive()
+lh.library/CreateBuffer                               lh.library/CreateBuffer
+
+   NAME
+       CreateBuffer -- Allocate an LhBuffer with work area  (V2)
+
+   SYNOPSIS
+       buffer = CreateBuffer(OnlyDecode);
+       D0                    D0
+
+       struct LhBuffer *CreateBuffer(LONG OnlyDecode);
+
+   FUNCTION
+       Allocates a struct LhBuffer and its internal auxiliary work area.
+       Do not allocate LhBuffer yourself; always obtain it from this LVO
+       and free it with DeleteBuffer().
+
+       OnlyDecode selects the work-area size: TRUE allocates a smaller
+       decode-only buffer (about 4500 bytes), FALSE allocates a larger
+       encode+decode buffer (about 40000 bytes).
+
+   INPUTS
+       OnlyDecode - TRUE for decode-only aux buffer, FALSE for encode+decode.
+
+   RESULT
+       buffer - pointer to LhBuffer, or NULL on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       DeleteBuffer(), LhEncode(), LhDecode(), LhCompress(), LhDecompress()
+lh.library/DeleteBuffer                               lh.library/DeleteBuffer
+
+   NAME
+       DeleteBuffer -- Free an LhBuffer from CreateBuffer  (V2)
+
+   SYNOPSIS
+       DeleteBuffer(OldBuffer);
+                    A0
+
+       VOID DeleteBuffer(struct LhBuffer *OldBuffer);
+
+   FUNCTION
+       Frees the LhBuffer and its auxiliary work area allocated by
+       CreateBuffer().  Pass NULL safely (no-op).
+
+   INPUTS
+       OldBuffer - buffer from CreateBuffer(), or NULL.
+
+   RESULT
+       None.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       CreateBuffer()
+lh.library/LhEncode                                   lh.library/LhEncode
+
+   NAME
+       LhEncode -- Compress a buffer (classic LhEncode / lh5)  (V2)
+
+   SYNOPSIS
+       size = LhEncode(Buffer);
+       D0              A0
+
+       ULONG LhEncode(struct LhBuffer *Buffer);
+
+   FUNCTION
+       Compresses Buffer->lh_Src (lh_SrcSize bytes) into Buffer->lh_Dst.
+       The destination must be at least lh_SrcSize + ENCODEEXTRA(lh_SrcSize)
+       bytes.  lh_Src and lh_Dst must not overlap.
+
+       Lhassa uses standard LHA lh5 compression (not the 1990 proprietary
+       Lh format).  On success, lh_DstSize is updated to the compressed size.
+
+   INPUTS
+       Buffer - LhBuffer with lh_Src/lh_SrcSize and lh_Dst/lh_DstSize set.
+
+   RESULT
+       size - compressed size in D0 and lh_DstSize, or 0 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhDecode(), CreateBuffer(), LhCompress()
+lh.library/LhDecode                                   lh.library/LhDecode
+
+   NAME
+       LhDecode -- Decompress a buffer (classic LhDecode / lh5)  (V2)
+
+   SYNOPSIS
+       size = LhDecode(Buffer);
+       D0              A0
+
+       ULONG LhDecode(struct LhBuffer *Buffer);
+
+   FUNCTION
+       Decompresses Buffer->lh_Src (lh_SrcSize bytes) into Buffer->lh_Dst.
+       lh_DstSize must be large enough for the full uncompressed payload.
+       lh_Src and lh_Dst must not overlap.
+
+   INPUTS
+       Buffer - LhBuffer with compressed source and output capacity set.
+
+   RESULT
+       size - decompressed size, or 0 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhEncode(), CreateBuffer(), LhDecompress()
+lh.library/LhCompress                                 lh.library/LhCompress
+
+   NAME
+       LhCompress -- Compress a buffer with an explicit method  (V2)
+
+   SYNOPSIS
+       size = LhCompress(Method, Buffer);
+       D0                D0      A0
+
+       ULONG LhCompress(LONG Method, struct LhBuffer *Buffer);
+
+   FUNCTION
+       Compresses Buffer->lh_Src into Buffer->lh_Dst using Method (for
+       example 0 for lh0/store, 5 for lh5).  Same buffer rules as LhEncode.
+
+   INPUTS
+       Method - LHA method number.
+       Buffer - LhBuffer with source and destination set.
+
+   RESULT
+       size - compressed size, or 0 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhDecompress(), LhEncode(), lh.library/constants
+lh.library/LhDecompress                               lh.library/LhDecompress
+
+   NAME
+       LhDecompress -- Decompress a buffer with an explicit method  (V2)
+
+   SYNOPSIS
+       size = LhDecompress(Method, Buffer);
+       D0                  D0      A0
+
+       ULONG LhDecompress(LONG Method, struct LhBuffer *Buffer);
+
+   FUNCTION
+       Decompresses Buffer->lh_Src into Buffer->lh_Dst using Method.
+       Same buffer rules as LhDecode.
+
+   INPUTS
+       Method - LHA method number used when the data was compressed.
+       Buffer - LhBuffer with source and destination set.
+
+   RESULT
+       size - decompressed size, or 0 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhCompress(), LhDecode(), lh.library/constants
+lh.library/LhOpenArchive                              lh.library/LhOpenArchive
+
+   NAME
+       LhOpenArchive -- Open an LHA archive as a volume root  (V2)
+
+   SYNOPSIS
+       archive = LhOpenArchive(Path, Mode);
+       D0                      D1    D0
+
+       struct LhArchive *LhOpenArchive(STRPTR Path, LONG Mode);
+
+   FUNCTION
+       Opens Path as an LHA archive.  Mode is LHARC_MODE_READ,
+       LHARC_MODE_WRITE, or LHARC_MODE_APPEND.
+
+       Read mode builds an in-memory catalog of entries.  Write mode
+       creates or truncates the archive.  Append mode adds entries to an
+       existing archive (or creates it if missing).
+
+       On failure, LhErr() returns a dos-style error code.
+
+   INPUTS
+       Path - archive file path.
+       Mode - LHARC_MODE_READ, LHARC_MODE_WRITE, or LHARC_MODE_APPEND.
+
+   RESULT
+       archive - opaque archive handle, or NULL on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhCloseArchive(), LhLock(), LhAddEntry(), LhErr()
+lh.library/LhCloseArchive                             lh.library/LhCloseArchive
+
+   NAME
+       LhCloseArchive -- Close an archive from LhOpenArchive  (V2)
+
+   SYNOPSIS
+       success = LhCloseArchive(Archive);
+       D0                       A0
+
+       LONG LhCloseArchive(struct LhArchive *Archive);
+
+   FUNCTION
+       Closes the archive, flushes any writer state, and frees the
+       LhArchive and its catalog.  Do not use the pointer afterward.
+
+   INPUTS
+       Archive - handle from LhOpenArchive(), or NULL (fails).
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhOpenArchive()
+lh.library/LhLock                                     lh.library/LhLock
+
+   NAME
+       LhLock -- Lock an archive entry or the archive root  (V2)
+
+   SYNOPSIS
+       lock = LhLock(Archive, Name);
+       D0            A0       A1
+
+       BPTR LhLock(struct LhArchive *Archive, STRPTR Name);
+
+   FUNCTION
+       Returns a lock on Name within Archive, or on the archive root when
+       Name is NULL or "".  The lock is not a dos.library lock; free it
+       only with LhUnLock().
+
+       Root locks are used with LhExamine/LhExNext/LhExAll.  Entry locks
+       are used with LhOpenFromLock and LhNameFromLock.
+
+   INPUTS
+       Archive - open archive (typically LHARC_MODE_READ).
+       Name    - entry path, or NULL/"" for the archive root.
+
+   RESULT
+       lock - lock handle, or NULL if not found (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhUnLock(), LhExamine(), LhExNext(), LhOpenFromLock(),
+       dos.library/Lock
+lh.library/LhUnLock                                   lh.library/LhUnLock
+
+   NAME
+       LhUnLock -- Free a lock from LhLock  (V2)
+
+   SYNOPSIS
+       success = LhUnLock(Lock);
+       D0                 A0
+
+       LONG LhUnLock(BPTR Lock);
+
+   FUNCTION
+       Frees a lock obtained from LhLock().  After LhOpenFromLock(), the
+       caller still owns the lock and must LhUnLock() it after LhClose().
+
+   INPUTS
+       Lock - lock from LhLock(), or NULL (fails).
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhLock(), LhClose(), dos.library/UnLock
+lh.library/LhExamine                                  lh.library/LhExamine
+
+   NAME
+       LhExamine -- Fill a FileInfoBlock for a lock  (V2)
+
+   SYNOPSIS
+       success = LhExamine(Lock, Fib);
+       D0                  A0    A1
+
+       LONG LhExamine(BPTR Lock, struct FileInfoBlock *Fib);
+
+   FUNCTION
+       Fills Fib for Lock.  On an archive root lock, returns the first
+       catalog entry and prepares LhExNext() for subsequent entries
+       (same pattern as dos.library/Examine + ExNext).
+
+       On an entry lock, fills Fib for that entry only.
+
+   INPUTS
+       Lock - lock from LhLock().
+       Fib  - FileInfoBlock to fill.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhExNext(), LhLock(), dos.library/Examine
+lh.library/LhExNext                                   lh.library/LhExNext
+
+   NAME
+       LhExNext -- Advance to the next archive entry  (V2)
+
+   SYNOPSIS
+       success = LhExNext(Lock, Fib);
+       D0                 A0    A1
+
+       LONG LhExNext(BPTR Lock, struct FileInfoBlock *Fib);
+
+   FUNCTION
+       Continues a directory walk started by LhExamine() on a root lock.
+       Fills Fib with the next catalog entry.  Returns DOSFALSE when no
+       more entries remain.
+
+   INPUTS
+       Lock - root lock previously used with LhExamine().
+       Fib  - FileInfoBlock to fill.
+
+   RESULT
+       success - DOSTRUE if another entry was returned, DOSFALSE at end.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhExamine(), LhExAll(), dos.library/ExNext
+lh.library/LhExAll                                    lh.library/LhExAll
+
+   NAME
+       LhExAll -- Examine multiple archive entries into a buffer  (V2)
+
+   SYNOPSIS
+       success = LhExAll(Lock, Buffer, Size, Type, Control);
+       D0                A0    D1      D0    D2    A1
+
+       LONG LhExAll(BPTR Lock, STRPTR Buffer, LONG Size, LONG Type,
+           struct ExAllControl *Control);
+
+   FUNCTION
+       Fills Buffer with linked ExAllData records for entries under a
+       root lock (ED_NAME through ED_COMMENT).  Control must be from
+       AllocDosObject(DOS_EXALLCONTROL, NULL) with eac_LastKey zeroed
+       before the first call.
+
+       Returns DOSTRUE while more catalog entries remain.  Returns
+       DOSFALSE when complete (LhErr() == ERROR_NO_MORE_ENTRIES) or on
+       error.  eac_Entries holds the number of records written by the
+       call, including the final completing call.
+
+       The archive index is built in memory, so LhExAll is typically
+       faster than LhExamine/LhExNext.
+
+   INPUTS
+       Lock    - root lock from LhLock(arc, "").
+       Buffer  - output buffer for ExAllData records.
+       Size    - size of Buffer in bytes.
+       Type    - ED_NAME .. ED_COMMENT.
+       Control - ExAllControl (eac_LastKey, eac_Entries, optional match).
+
+   RESULT
+       success - DOSTRUE if more entries remain, DOSFALSE when done/error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhExAllEnd(), LhExNext(), dos.library/ExAll, LhErr()
+lh.library/LhExAllEnd                                 lh.library/LhExAllEnd
+
+   NAME
+       LhExAllEnd -- Abort an in-progress LhExAll scan  (V2)
+
+   SYNOPSIS
+       success = LhExAllEnd(Lock);
+       D0                   A0
+
+       LONG LhExAllEnd(BPTR Lock);
+
+   FUNCTION
+       Aborts an in-progress LhExAll() scan on Lock (dos.library/ExAllEnd
+       equivalent).  The next LhExAll() on that lock returns
+       ERROR_NO_MORE_ENTRIES.
+
+   INPUTS
+       Lock - root lock used with LhExAll().
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhExAll(), dos.library/ExAllEnd
+lh.library/LhInfo                                     lh.library/LhInfo
+
+   NAME
+       LhInfo -- Return volume-style info for an archive lock  (V2)
+
+   SYNOPSIS
+       success = LhInfo(Lock, Info);
+       D0               A0    A1
+
+       LONG LhInfo(BPTR Lock, struct InfoData *Info);
+
+   FUNCTION
+       Fills Info with summary data for the archive (block counts derived
+       from catalog sizes).  Mirrors dos.library/Info for the archive
+       volume.
+
+   INPUTS
+       Lock - any lock on the archive.
+       Info - InfoData to fill.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhLock(), dos.library/Info
+lh.library/LhOpenFromLock                             lh.library/LhOpenFromLock
+
+   NAME
+       LhOpenFromLock -- Open a file handle from an entry lock  (V2)
+
+   SYNOPSIS
+       fh = LhOpenFromLock(Lock, Mode);
+       D0                   A0    D0
+
+       BPTR LhOpenFromLock(BPTR Lock, LONG Mode);
+
+   FUNCTION
+       Opens a read handle for the entry referenced by Lock and loads the
+       decompressed payload into memory.  Use LhRead/LhSeek/LhClose on
+       the handle.
+
+       Does not take ownership of Lock; the caller must still LhUnLock()
+       after LhClose().
+
+   INPUTS
+       Lock - entry lock from LhLock() (not a root lock).
+       Mode - open mode (typically MODE_OLDFILE).
+
+   RESULT
+       fh - file handle, or NULL on failure (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhOpen(), LhRead(), LhClose(), LhUnLock(), dos.library/OpenFromLock
+lh.library/LhOpen                                     lh.library/LhOpen
+
+   NAME
+       LhOpen -- Open a named archive entry  (V2)
+
+   SYNOPSIS
+       fh = LhOpen(Archive, Name, Mode);
+       D0           A0       A1    D0
+
+       BPTR LhOpen(struct LhArchive *Archive, STRPTR Name, LONG Mode);
+
+   FUNCTION
+       Opens a named archive entry in one step (LhLock + LhOpenFromLock).
+       Same role as dos.library/Open on a file within the archive volume.
+       The internal lock is owned by the handle and freed by LhClose().
+
+   INPUTS
+       Archive - open archive.
+       Name    - entry path within the archive.
+       Mode    - open mode (typically MODE_OLDFILE).
+
+   RESULT
+       fh - file handle, or NULL on failure (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhOpenFromLock(), LhRead(), LhClose(), dos.library/Open
+lh.library/LhRead                                     lh.library/LhRead
+
+   NAME
+       LhRead -- Read from an archive entry handle  (V2)
+
+   SYNOPSIS
+       count = LhRead(Fh, Buffer, Len);
+       D0             D1  A0      D0
+
+       LONG LhRead(BPTR Fh, APTR Buffer, LONG Len);
+
+   FUNCTION
+       Reads up to Len bytes from Fh into Buffer.  Argument order matches
+       dos.library/Read.
+
+   INPUTS
+       Fh     - handle from LhOpen() or LhOpenFromLock().
+       Buffer - destination buffer.
+       Len    - maximum bytes to read.
+
+   RESULT
+       count - bytes read, 0 at EOF, or -1 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhWrite(), LhSeek(), LhClose(), dos.library/Read
+lh.library/LhWrite                                    lh.library/LhWrite
+
+   NAME
+       LhWrite -- Write to an archive entry handle  (V2)
+
+   SYNOPSIS
+       count = LhWrite(Fh, Buffer, Len);
+       D0              D1  A0      D0
+
+       LONG LhWrite(BPTR Fh, APTR Buffer, LONG Len);
+
+   FUNCTION
+       Writes Len bytes from Buffer to Fh.  Argument order matches
+       dos.library/Write.
+
+       Write support is reserved for archives opened for write/append.
+       Handles opened for read reject writes (return -1).
+
+   INPUTS
+       Fh     - handle from LhOpen() or LhOpenFromLock().
+       Buffer - source buffer.
+       Len    - bytes to write.
+
+   RESULT
+       count - bytes written, or -1 on error / not writable.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhRead(), LhAddEntry(), dos.library/Write
+lh.library/LhClose                                    lh.library/LhClose
+
+   NAME
+       LhClose -- Close an archive entry handle  (V2)
+
+   SYNOPSIS
+       success = LhClose(Fh);
+       D0                D1
+
+       LONG LhClose(BPTR Fh);
+
+   FUNCTION
+       Closes Fh and frees its payload buffer.  If the handle was created
+       by LhOpen(), the internal lock is also freed.  If the handle was
+       created by LhOpenFromLock(), the caller still owns the lock and
+       must LhUnLock() it.
+
+   INPUTS
+       Fh - handle from LhOpen() or LhOpenFromLock().
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhOpen(), LhOpenFromLock(), LhUnLock(), dos.library/Close
+lh.library/LhSeek                                     lh.library/LhSeek
+
+   NAME
+       LhSeek -- Seek within an archive entry handle  (V2)
+
+   SYNOPSIS
+       pos = LhSeek(Fh, Position, Mode);
+       D0           D1  D2        D0
+
+       LONG LhSeek(BPTR Fh, LONG Position, LONG Mode);
+
+   FUNCTION
+       Sets the read/write position in Fh.  Mode is OFFSET_BEGINNING,
+       OFFSET_CURRENT, or OFFSET_END (same as dos.library/Seek).
+
+   INPUTS
+       Fh       - handle from LhOpen() or LhOpenFromLock().
+       Position - offset (interpretation depends on Mode).
+       Mode     - OFFSET_BEGINNING, OFFSET_CURRENT, or OFFSET_END.
+
+   RESULT
+       pos - new position from start of entry, or -1 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhRead(), LhWrite(), dos.library/Seek
+lh.library/LhNameFromLock                             lh.library/LhNameFromLock
+
+   NAME
+       LhNameFromLock -- Copy the entry name from a lock  (V2)
+
+   SYNOPSIS
+       len = LhNameFromLock(Lock, Buffer, Len);
+       D0                   A0    A1      D0
+
+       LONG LhNameFromLock(BPTR Lock, STRPTR Buffer, LONG Len);
+
+   FUNCTION
+       Copies the entry name for Lock into Buffer (NUL-terminated, at most
+       Len-1 characters).  For a root lock, Buffer receives an empty string.
+
+   INPUTS
+       Lock   - lock from LhLock().
+       Buffer - destination string buffer.
+       Len    - size of Buffer in bytes.
+
+   RESULT
+       len - strlen of the name written, or 0 on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhLock(), dos.library/NameFromLock
+lh.library/LhAddEntry                                 lh.library/LhAddEntry
+
+   NAME
+       LhAddEntry -- Add a file entry to a writable archive  (V2)
+
+   SYNOPSIS
+       success = LhAddEntry(Archive, Name, Data, DataLen);
+       D0                   A0       A1    A2    D0
+
+       LONG LhAddEntry(struct LhArchive *Archive, STRPTR Name, APTR Data,
+           LONG DataLen);
+
+   FUNCTION
+       Appends Name with payload Data (DataLen bytes) to Archive.  Archive
+       must be opened with LHARC_MODE_WRITE or LHARC_MODE_APPEND.
+
+       Entries are stored with level-1 headers.  On failure, LhErr() is set.
+
+   INPUTS
+       Archive - archive opened for write or append.
+       Name    - entry path within the archive.
+       Data    - payload bytes (may be NULL only if DataLen is 0).
+       DataLen - payload length in bytes.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhOpenArchive(), LhDeleteFile(), LhConcatArchive()
+lh.library/LhDeleteFile                               lh.library/LhDeleteFile
+
+   NAME
+       LhDeleteFile -- Remove an entry from an archive  (V2)
+
+   SYNOPSIS
+       success = LhDeleteFile(Archive, Name);
+       D0                     A0       A1
+
+       LONG LhDeleteFile(struct LhArchive *Archive, STRPTR Name);
+
+   FUNCTION
+       Rewrites the archive excluding the named entry.  Same role as
+       dos.library/DeleteFile on a file within the archive volume.
+
+       The archive file is rewritten via a temporary file and rename.
+       If Archive was opened for read, its catalog is rebuilt afterward.
+
+   INPUTS
+       Archive - open archive.
+       Name    - entry path to remove.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhAddEntry(), LhOpenArchive(), dos.library/DeleteFile
+lh.library/LhConcatArchive                            lh.library/LhConcatArchive
+
+   NAME
+       LhConcatArchive -- Append all entries from another archive  (V2)
+
+   SYNOPSIS
+       success = LhConcatArchive(Dest, SourcePath);
+       D0                        A0    A1
+
+       LONG LhConcatArchive(struct LhArchive *Dest, STRPTR SourcePath);
+
+   FUNCTION
+       Appends all file entries from SourcePath into Dest (LhA "c" command).
+       Dest must be opened with LHARC_MODE_WRITE or LHARC_MODE_APPEND.
+
+   INPUTS
+       Dest       - destination archive (write/append).
+       SourcePath - path of source archive to read.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhAddEntry(), LhOpenArchive()
+lh.library/LhSetPassword                              lh.library/LhSetPassword
+
+   NAME
+       LhSetPassword -- Set password for encrypted entries  (V2)
+
+   SYNOPSIS
+       success = LhSetPassword(Archive, Password);
+       D0                      A0       A1
+
+       LONG LhSetPassword(struct LhArchive *Archive, STRPTR Password);
+
+   FUNCTION
+       Associates Password with Archive for subsequent encrypted entry
+       operations.  Pass "" to clear the password.
+
+   INPUTS
+       Archive  - open archive.
+       Password - password string, or "" to clear.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhOpenArchive(), LhReadData()
+lh.library/LhReadData                                 lh.library/LhReadData
+
+   NAME
+       LhReadData -- Read a named entry into an AllocMem buffer  (V2)
+
+   SYNOPSIS
+       len = LhReadData(Archive, Name, DataOut);
+       D0               A0       A1    A2
+
+       LONG LhReadData(struct LhArchive *Archive, STRPTR Name, APTR *DataOut);
+
+   FUNCTION
+       Decompresses Name from Archive into a newly AllocMem'd buffer.
+       *DataOut receives the buffer; the caller must FreeMem() it using
+       the returned length.
+
+       The byte count is returned only in D0 because SAS/C #pragma libcall
+       does not reliably pass a fourth output pointer for size.
+
+   INPUTS
+       Archive - archive opened for read.
+       Name    - entry path within the archive.
+       DataOut - receives AllocMem pointer on success.
+
+   RESULT
+       len - decompressed byte count (>= 0), or -1 on error (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhExtractEntry(), LhTestEntry(), LhOpen()
+lh.library/LhExtractEntry                             lh.library/LhExtractEntry
+
+   NAME
+       LhExtractEntry -- Extract a named entry to a filesystem path  (V2)
+
+   SYNOPSIS
+       success = LhExtractEntry(Archive, Name, DestPath);
+       D0                       A0       A1    A2
+
+       LONG LhExtractEntry(struct LhArchive *Archive, STRPTR Name,
+           STRPTR DestPath);
+
+   FUNCTION
+       Decompresses Name and writes it to DestPath.  Parent directories
+       are created as needed.  The entire decompress/write runs inside
+       the library.
+
+   INPUTS
+       Archive  - archive opened for read.
+       Name     - entry path within the archive.
+       DestPath - destination filesystem path.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhReadData(), LhTestEntry()
+lh.library/LhTestEntry                                lh.library/LhTestEntry
+
+   NAME
+       LhTestEntry -- Verify a named entry by decompressing it  (V2)
+
+   SYNOPSIS
+       len = LhTestEntry(Archive, Name);
+       D0                A0       A1
+
+       LONG LhTestEntry(struct LhArchive *Archive, STRPTR Name);
+
+   FUNCTION
+       Decompresses Name to verify integrity, then discards the buffer.
+       Useful for archive testing without writing files.
+
+   INPUTS
+       Archive - archive opened for read.
+       Name    - entry path within the archive.
+
+   RESULT
+       len - decompressed byte count on success, or -1 on error.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhReadData(), LhExtractEntry()
+lh.library/LhPrintEntry                               lh.library/LhPrintEntry
+
+   NAME
+       LhPrintEntry -- Write a named entry to the process Output()  (V2)
+
+   SYNOPSIS
+       success = LhPrintEntry(Archive, Name);
+       D0                     A0       A1
+
+       LONG LhPrintEntry(struct LhArchive *Archive, STRPTR Name);
+
+   FUNCTION
+       Decompresses Name and writes the payload to the current process
+       Output() stream (typically the console).
+
+   INPUTS
+       Archive - archive opened for read.
+       Name    - entry path within the archive.
+
+   RESULT
+       success - DOSTRUE on success, DOSFALSE on failure (see LhErr()).
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       LhReadData(), LhExtractEntry()
+lh.library/LhErr                                      lh.library/LhErr
+
+   NAME
+       LhErr -- Return the last archive error code  (V2)
+
+   SYNOPSIS
+       code = LhErr();
+       D0
+
+       LONG LhErr(VOID);
+
+   FUNCTION
+       Returns the last archive error code stored in the library base
+       (dos.library IoErr-style numbers).  Call after a failed archive
+       LVO.  Classic buffer LVOs do not update this value.
+
+   INPUTS
+       None.
+
+   RESULT
+       code - last error code, or 0 if none.
+
+   EXAMPLE
+
+   NOTES
+
+   BUGS
+
+   SEE ALSO
+       lh.library/errors, dos.library/IoErr
