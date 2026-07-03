@@ -1,0 +1,30 @@
+#
+# Source/test/smakefile - build LhTest (lh.library smoke harness)
+#
+# Prerequisite: smake install + smake headers in Source/lib_source
+#
+
+CC      = sc
+LD      = slink
+RM      = delete force quiet
+
+TARGET  = LhTest
+
+all: $(TARGET)
+
+rebuild: clean all
+
+$(TARGET): LhTest.o libbases.o smakefile.wth
+	$(LD) WITH smakefile.wth
+
+LhTest.o: LhTest.c
+	$(CC) LhTest.c OBJNAME=LhTest.o
+
+libbases.o: libbases.c
+	$(CC) libbases.c OBJNAME=libbases.o
+
+clean:
+	-$(RM) LhTest.o
+	-$(RM) libbases.o
+	-$(RM) $(TARGET)
+	-$(RM) $(TARGET).info

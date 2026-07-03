@@ -1,0 +1,5 @@
+FROM     sc:lib/c.o LhTest.o libbases.o
+LIB      sc:lib/sc.lib LIB:amiga.lib
+SC SD ND
+NODEBUG
+TO       LhTest
