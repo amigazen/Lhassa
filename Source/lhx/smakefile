@@ -1,0 +1,38 @@
+#
+# Source/lhasa/smakefile - LhX (100% Amiga-native lh.library client)
+#
+# dos.library / exec.library / utility.library — no libc string/stdio.
+# Prerequisite: lh.library built and installed (SDK/Include_h/proto/lh.h).
+#
+
+
+CC      = sc
+LD      = slink
+RM      = delete force quiet
+
+TARGET  = LhX
+OBJS    = lhx.o lhx_cmds.o lhx_util.o
+
+all: $(TARGET)
+
+rebuild: clean all
+
+$(TARGET): $(OBJS)
+	$(LD) FROM sc:lib/c.o $(OBJS) TO $(TARGET) STRIPDEBUG NODEBUG LIB lib:small.lib sc:lib/sc.lib BATCH
+
+lhx.o: lhx.c lhx_internal.h
+	$(CC) DEF=AMIGA lhx.c OBJNAME=lhx.o
+
+lhx_cmds.o: lhx_cmds.c lhx_internal.h
+	$(CC) DEF=AMIGA lhx_cmds.c OBJNAME=lhx_cmds.o
+
+lhx_util.o: lhx_util.c lhx_internal.h
+	$(CC) DEF=AMIGA lhx_util.c OBJNAME=lhx_util.o
+
+clean:
+	-$(RM) $(OBJS)
+	-$(RM) $(TARGET)
+	-$(RM) $(TARGET).info
+
+install:
+	copy $(TARGET) C:$(TARGET)

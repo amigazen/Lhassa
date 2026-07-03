@@ -57,7 +57,7 @@ static BOOL lt_mutate_ok;
 static char lt_cur_name[80];
 static char lt_cur_expect[96];
 
-static const char lt_stack_cookie[] = "$STACK: 32768\n";
+static const char lt_stack_cookie[] = "$STACK: 8192";
 
 /* Print the test name and expected result before the call under test. */
 static VOID

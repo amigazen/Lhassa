@@ -1,15 +1,15 @@
-# Makefile for Lhassa � GNU make, AmigaOS 68k via vbcc
+# Makefile for Lhassa - GNU make, AmigaOS 68k via vbcc
 #
 # Default build uses vbcc (vc + vlink ? Hunk executable).
 # Host smoke-test only: make HOST=1
 
 MAKEFLAGS += -r
 
-CPPFLAGS += -Iinclude -Isrc
+CPPFLAGS += -Iinclude -Isrc -Icli
 AR      ?= ar
 LHA     = lha
 
-CLISRC = cli/lha.c cli/lha_parse.c cli/lha_util.c cli/lha_cmds.c
+CLISRC = cli/lha.c cli/lha_parse.c cli/lha_util.c cli/lha_cmds.c cli/lha_amiga.c
 CLIOBJ = $(CLISRC:.c=.o)
 
 ifeq ($(HOST),1)

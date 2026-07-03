@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 amigazen project
  *
- * lh_lh5dec.c - LH4/LH5 decompression (lhex/huf.c decode_st1 path).
+ * lh_lh5dec.c - LH4/LH5 decompression.
  *
  * -lh5- archives use block Huffman (NC=510)
  */

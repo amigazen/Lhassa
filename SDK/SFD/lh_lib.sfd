@@ -1,0 +1,51 @@
+==id $VER: lh_lib.sfd 2.1 (03.07.2026)
+* "lh.library"
+==base LhBase
+==basetype struct Library *
+==libname lh.library
+==bias 30
+==public
+==include <exec/types.h>
+==include <exec/libraries.h>
+==include <dos/dos.h>
+==include <dos/exall.h>
+==include <libraries/lhlib.h>
+==version 2
+*
+* Classic LhLib API (Holger Krekel 1990) + extended codec
+*
+struct LhBuffer *CreateBuffer (LONG OnlyDecode)(D0)
+void DeleteBuffer (struct LhBuffer *OldBuffer)(A0)
+ULONG LhEncode (struct LhBuffer *Buffer)(A0)
+ULONG LhDecode (struct LhBuffer *Buffer)(A0)
+ULONG LhCompress (LONG Method, struct LhBuffer *Buffer)(D0,A0)
+ULONG LhDecompress (LONG Method, struct LhBuffer *Buffer)(D0,A0)
+*
+* DOS.library-style archive access (LhArchive volume root)
+*
+struct LhArchive *LhOpenArchive (STRPTR Path, LONG Mode)(D1,D0)
+LONG LhCloseArchive (struct LhArchive *Archive)(A0)
+BPTR LhLock (struct LhArchive *Archive, STRPTR Name)(A0,A1)
+LONG LhUnLock (BPTR Lock)(A0)
+LONG LhExamine (BPTR Lock, struct FileInfoBlock *Fib)(A0,A1)
+LONG LhExNext (BPTR Lock, struct FileInfoBlock *Fib)(A0,A1)
+LONG LhExAll (BPTR Lock, STRPTR Buffer, LONG Size, LONG Type, struct ExAllControl *Control)(A0,D1,D0,D2,A1)
+LONG LhExAllEnd (BPTR Lock)(A0)
+LONG LhInfo (BPTR Lock, struct InfoData *Info)(A0,A1)
+BPTR LhOpenFromLock (BPTR Lock, LONG Mode)(A0,D0)
+BPTR LhOpen (struct LhArchive *Archive, STRPTR Name, LONG Mode)(A0,A1,D0)
+LONG LhRead (BPTR Fh, APTR Buffer, LONG Len)(D1,A0,D0)
+LONG LhWrite (BPTR Fh, APTR Buffer, LONG Len)(D1,A0,D0)
+LONG LhClose (BPTR Fh)(D1)
+LONG LhSeek (BPTR Fh, LONG Position, LONG Mode)(D1,D2,D0)
+LONG LhNameFromLock (BPTR Lock, STRPTR Buffer, LONG Len)(A0,A1,D0)
+LONG LhAddEntry (struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen)(A0,A1,A2,D0)
+LONG LhDeleteFile (struct LhArchive *Archive, STRPTR Name)(A0,A1)
+LONG LhConcatArchive (struct LhArchive *Dest, STRPTR SourcePath)(A0,A1)
+LONG LhSetPassword (struct LhArchive *Archive, STRPTR Password)(A0,A1)
+LONG LhReadData (struct LhArchive *Archive, STRPTR Name, APTR *DataOut)(A0,A1,A2)
+LONG LhExtractEntry (struct LhArchive *Archive, STRPTR Name, STRPTR DestPath)(A0,A1,A2)
+LONG LhTestEntry (struct LhArchive *Archive, STRPTR Name)(A0,A1)
+LONG LhPrintEntry (struct LhArchive *Archive, STRPTR Name)(A0,A1)
+LONG LhErr ()()
+==end

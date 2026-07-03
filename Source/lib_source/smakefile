@@ -2,7 +2,7 @@
 # Source/lib_source/smakefile - lh.library (Amiga-native shell + pooled core)
 #
 # Core I/O: dos.library (lh_archive.c lh_stream).  No stdio/stdlib in library.
-# DEF=AMIGA -> LH_AMIGA per src/lh_platform.h and LIBC_TO_AMIGA.md.
+# DEF=AMIGA -> LH_AMIGA per src/lh_platform.h .
 #
 # Targets:
 #   smake          -> lh.library (shared)
