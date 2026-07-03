@@ -1,0 +1,17 @@
+FROM     StartUp.o
+         LibInit.o
+         malloc.o
+         lh_lvo.o
+         lh_archive_dos.o
+         lh_error.o
+         lh_crc.o
+         lh_crypto.o
+         lh_datetime.o
+         lh_codec.o
+         lh_lh5dec.o
+         lh_header.o
+         lh_archive.o
+         lh_buffer.o
+LIB      LIB:sc.lib LIB:amiga.lib
+NODEBUG
+TO       lh.library

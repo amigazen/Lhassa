@@ -1,0 +1,1315 @@
+/*
+ * SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright (c) 2026 amigazen project
+ *
+ * lh_archive_dos.c - DOS.library-style archive access for lh.library.
+ *
+ * lh_arc_Archive acts as a volume root; lh_arc_Lock/lh_arc_examine/lh_arc_exnext mirror dos.library
+ * directory traversal.  lh_arc_open_from_lock/lh_arc_read/lh_arc_closefh mirror file I/O on entries.
+ */
+
+#include "lh_native_guard.h"
+
+#include <string.h>
+#include <stddef.h>
+
+#include <exec/types.h>
+#include <exec/memory.h>
+#include <dos/dos.h>
+#include <dos/exall.h>
+#include <proto/exec.h>
+#include <proto/dos.h>
+#include <utility/hooks.h>
+
+#ifndef ST_FILE
+#define ST_FILE (-3L)
+#endif
+
+#include "/include/lh.h"
+#include "lh/lhbase.h"
+#include "lh_archive_dos.h"
+
+/* Pool allocators from malloc.c (not in libc headers on SAS/C). */
+void *malloc(size_t size);
+void free(void *ptr);
+void *calloc(size_t num, size_t size);
+void *realloc(void *ptr, size_t size);
+
+extern struct LHBase *LhBase;
+
+static void lh_arc_seterr(LONG code)
+{
+    if (LhBase) {
+        LhBase->lhb_Err = code;
+    }
+}
+
+static void lh_arc_clearerr(void)
+{
+    if (LhBase) {
+        LhBase->lhb_Err = 0;
+    }
+}
+
+/* MODE_NEWFILE needs an absent path; rename aside if DeleteFile fails. */
+static void lh_arc_remove_path(STRPTR path)
+{
+    BPTR fh;
+    LONG retry;
+    char aside[560];
+    LONG plen;
+
+    if (!path || !path[0]) {
+        return;
+    }
+    for (retry = 0; retry < 4; retry++) {
+        SetIoErr(0);
+        fh = Open(path, MODE_OLDFILE);
+        if (fh != (BPTR)NULL) {
+            Close(fh);
+        }
+        DeleteFile(path);
+        SetIoErr(0);
+        fh = Open(path, MODE_OLDFILE);
+        if (fh == (BPTR)NULL) {
+            if (IoErr() == ERROR_OBJECT_NOT_FOUND || IoErr() == 0) {
+                return;
+            }
+        } else {
+            Close(fh);
+        }
+    }
+    plen = (LONG)strlen((const char *)path);
+    if (plen <= 0 || plen >= (LONG)sizeof(aside) - 4) {
+        return;
+    }
+    strcpy(aside, (const char *)path);
+    strcat(aside, ".$$");
+    SetIoErr(0);
+    fh = Open(path, MODE_OLDFILE);
+    if (fh != (BPTR)NULL) {
+        Close(fh);
+    }
+    if (Rename(path, (STRPTR)aside)) {
+        DeleteFile((STRPTR)aside);
+    }
+    SetIoErr(0);
+}
+
+#ifndef OFFSET_BEGINNING
+#define OFFSET_BEGINNING (-1L)
+#define OFFSET_CURRENT   0L
+#define OFFSET_END       1L
+#endif
+
+struct lh_arc_entry_ref {
+    char *name;
+    unsigned long packed;
+    unsigned long orig;
+    lh_method method;
+    unsigned char attrs;
+    lh_datetime dt;
+    int is_directory;
+    unsigned short crc;
+};
+
+struct LhArchive {
+    char path[512];
+    LONG mode;
+    lh_reader *reader;
+    lh_writer *writer;
+    struct lh_arc_entry_ref *catalog;
+    LONG catalog_count;
+    char password[256];
+    int has_password;
+    lh_datetime archive_dt;
+    int has_archive_dt;
+};
+
+struct LhLock {
+    struct LhArchive *archive;
+    LONG entry_index;
+    LONG iterate_index;
+    char name[512];
+    int exall_aborted;
+};
+
+struct LhFileHandle {
+    struct LhLock *lock;
+    int owns_lock;
+    unsigned char *data;
+    unsigned long size;
+    unsigned long pos;
+    LONG writable;
+};
+
+static void lh_arc_clear_catalog(struct LhArchive *arc)
+{
+    LONG i;
+
+    if (!arc || !arc->catalog) {
+        return;
+    }
+    for (i = 0; i < arc->catalog_count; i++) {
+        free(arc->catalog[i].name);
+    }
+    free(arc->catalog);
+    arc->catalog = NULL;
+    arc->catalog_count = 0;
+}
+
+static int lh_arc_grow_catalog(struct LhArchive *arc)
+{
+    struct lh_arc_entry_ref *n;
+    LONG ncap;
+
+    ncap = arc->catalog_count + 16;
+    n = (struct lh_arc_entry_ref *)realloc(
+        arc->catalog, (size_t)ncap * sizeof(struct lh_arc_entry_ref));
+    if (!n) {
+        return 0;
+    }
+    arc->catalog = n;
+    return 1;
+}
+
+static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry)
+{
+    struct lh_arc_entry_ref *ref;
+    char *name_copy;
+
+    if (!arc || !entry || !entry->filename) {
+        return 0;
+    }
+    if ((arc->catalog_count % 16) == 0 && arc->catalog_count > 0) {
+        if (!lh_arc_grow_catalog(arc)) {
+            return 0;
+        }
+    }
+    if (arc->catalog_count == 0 && !arc->catalog) {
+        arc->catalog = (struct lh_arc_entry_ref *)calloc(
+            16, sizeof(struct lh_arc_entry_ref));
+        if (!arc->catalog) {
+            return 0;
+        }
+    }
+    name_copy = (char *)malloc(strlen(entry->filename) + 1);
+    if (!name_copy) {
+        return 0;
+    }
+    strcpy(name_copy, entry->filename);
+    ref = &arc->catalog[arc->catalog_count];
+    ref->name = name_copy;
+    ref->packed = (unsigned long)entry->packed_len;
+    ref->orig = (unsigned long)entry->data_len;
+    ref->method = entry->method;
+    ref->attrs = entry->attrs;
+    ref->dt = entry->datetime;
+    ref->is_directory = entry->is_directory;
+    ref->crc = entry->crc;
+    arc->catalog_count++;
+    return 1;
+}
+
+static int lh_arc_build_catalog(struct LhArchive *arc)
+{
+    lh_entry entry;
+    lh_status st;
+
+    if (!arc || !arc->reader) {
+        return 0;
+    }
+    lh_arc_clear_catalog(arc);
+    lh_reader_set_header_only(arc->reader, 1);
+    for (;;) {
+        memset(&entry, 0, sizeof(entry));
+        st = lh_reader_next(arc->reader, &entry);
+        if (st == LH_OK && !entry.filename) {
+            break;
+        }
+        if (st != LH_OK) {
+            lh_entry_clear(&entry);
+            return 0;
+        }
+        if (!lh_arc_catalog_add(arc, &entry)) {
+            lh_entry_clear(&entry);
+            return 0;
+        }
+        lh_entry_clear(&entry);
+    }
+    lh_reader_set_header_only(arc->reader, 0);
+    return 1;
+}
+
+static void lh_dt_to_datestamp(const lh_datetime *dt, struct DateStamp *ds)
+{
+    unsigned long unix_secs;
+    unsigned long amiga_secs;
+
+    if (!dt || !ds) {
+        return;
+    }
+    memset(ds, 0, sizeof(*ds));
+    /* Approximate conversion via lh pack/unpack not available here; use fields. */
+    unix_secs = (unsigned long)dt->second
+        + (unsigned long)dt->minute * 60UL
+        + (unsigned long)dt->hour * 3600UL
+        + (unsigned long)(dt->day - 1) * 86400UL
+        + (unsigned long)(dt->month - 1) * 30UL * 86400UL
+        + (unsigned long)(dt->year - 1970) * 365UL * 86400UL;
+    amiga_secs = unix_secs - ((8UL * 365UL + 2UL) * 86400UL);
+    ds->ds_Days = (LONG)(amiga_secs / 86400UL);
+    amiga_secs %= 86400UL;
+    ds->ds_Minute = (LONG)(amiga_secs / 60UL);
+    ds->ds_Tick = (LONG)((amiga_secs % 60UL) * 50UL);
+}
+
+static void lh_ref_to_fib(const struct lh_arc_entry_ref *ref, struct FileInfoBlock *fib)
+{
+    if (!ref || !fib) {
+        return;
+    }
+    memset(fib, 0, sizeof(*fib));
+    strncpy(fib->fib_FileName, ref->name, sizeof(fib->fib_FileName) - 1);
+    fib->fib_FileName[sizeof(fib->fib_FileName) - 1] = '\0';
+    fib->fib_Size = (LONG)ref->orig;
+    fib->fib_NumBlocks = (LONG)((ref->orig + 511UL) / 512UL);
+    fib->fib_Protection = (LONG)ref->attrs;
+    if (ref->is_directory) {
+        /* dos.doc: fib_DirEntryType positive for directories. */
+        fib->fib_DirEntryType = 2;
+    } else {
+        fib->fib_DirEntryType = (LONG)ST_FILE;
+    }
+    lh_dt_to_datestamp(&ref->dt, &fib->fib_Date);
+    fib->fib_Comment[0] = '\0';
+}
+
+static int lh_name_match(const char *pattern, const char *name)
+{
+    if (!pattern || !pattern[0] || strcmp(pattern, "*") == 0) {
+        return 1;
+    }
+    return strcmp(pattern, name) == 0;
+}
+
+static LONG lh_find_entry_index(struct LhArchive *arc, const char *name)
+{
+    LONG i;
+
+    if (!arc || !name) {
+        return -1;
+    }
+    for (i = 0; i < arc->catalog_count; i++) {
+        if (lh_name_match(name, arc->catalog[i].name)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int lh_read_entry_at_index(struct LhArchive *arc, LONG index,
+    unsigned char **out, unsigned long *out_len, int *crc_ok)
+{
+    lh_entry entry;
+    lh_status st;
+    LONG i;
+
+    if (!arc || !arc->reader || index < 0 || !out || !out_len) {
+        return 0;
+    }
+    if (arc->has_password) {
+        lh_reader_set_password(arc->reader, arc->password);
+    }
+    lh_reader_set_header_only(arc->reader, 0);
+    for (i = 0; ; i++) {
+        memset(&entry, 0, sizeof(entry));
+        st = lh_reader_next(arc->reader, &entry);
+        if (st == LH_OK && !entry.filename) {
+            break;
+        }
+        if (st != LH_OK) {
+            lh_entry_clear(&entry);
+            return 0;
+        }
+        if (i == index) {
+            if (entry.is_directory || !entry.data || entry.data_len == 0) {
+                lh_entry_clear(&entry);
+                return 0;
+            }
+            *out = entry.data;
+            *out_len = (unsigned long)entry.data_len;
+            entry.data = NULL;
+            if (crc_ok) {
+                *crc_ok = entry.crc_ok;
+            }
+            lh_entry_clear(&entry);
+            return 1;
+        }
+        lh_entry_clear(&entry);
+    }
+    return 0;
+}
+
+static int lh_read_entry_data(struct LhArchive *arc, const char *name,
+    unsigned char **out, unsigned long *out_len, int *crc_ok)
+{
+    lh_entry entry;
+    lh_status st;
+
+    if (!arc || !arc->reader || !name || !out || !out_len) {
+        return 0;
+    }
+    if (arc->has_password) {
+        lh_reader_set_password(arc->reader, arc->password);
+    }
+    lh_reader_set_header_only(arc->reader, 0);
+    for (;;) {
+        memset(&entry, 0, sizeof(entry));
+        st = lh_reader_next(arc->reader, &entry);
+        if (st == LH_OK && !entry.filename) {
+            break;
+        }
+        if (st != LH_OK) {
+            lh_entry_clear(&entry);
+            return 0;
+        }
+        if (strcmp(entry.filename, name) == 0) {
+            if (entry.is_directory) {
+                *out = NULL;
+                *out_len = 0;
+                if (crc_ok) {
+                    *crc_ok = 1;
+                }
+                lh_entry_clear(&entry);
+                return 1;
+            }
+            if (!entry.data || entry.data_len == 0) {
+                lh_entry_clear(&entry);
+                return 0;
+            }
+            *out = entry.data;
+            *out_len = (unsigned long)entry.data_len;
+            entry.data = NULL;
+            if (crc_ok) {
+                *crc_ok = entry.crc_ok;
+            }
+            lh_entry_clear(&entry);
+            return 1;
+        }
+        lh_entry_clear(&entry);
+    }
+    return 0;
+}
+
+static void lh_reopen_reader(struct LhArchive *arc)
+{
+    lh_status err;
+
+    if (!arc) {
+        return;
+    }
+    if (arc->reader) {
+        lh_reader_close(&arc->reader);
+    }
+    arc->reader = lh_reader_open(arc->path, &err);
+    if (arc->reader && arc->has_password) {
+        lh_reader_set_password(arc->reader, arc->password);
+    }
+}
+
+struct LhArchive *lh_arc_open(STRPTR path, LONG mode)
+{
+    struct LhArchive *arc;
+    lh_status err;
+
+    if (!path || !path[0]) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return NULL;
+    }
+    arc = (struct LhArchive *)calloc(1, sizeof(*arc));
+    if (!arc) {
+        lh_arc_seterr(ERROR_NO_FREE_STORE);
+        return NULL;
+    }
+    strncpy(arc->path, (const char *)path, sizeof(arc->path) - 1);
+    arc->path[sizeof(arc->path) - 1] = '\0';
+    arc->mode = mode;
+    if (mode == LHARC_MODE_WRITE) {
+        lh_arc_remove_path(path);
+        arc->writer = lh_writer_open(arc->path, 1, LH_LEVEL_LH5, &err);
+        if (!arc->writer) {
+            free(arc);
+            if (err == LH_ERR_NO_MEMORY) {
+                lh_arc_seterr(ERROR_NO_FREE_STORE);
+            } else if (IoErr() != 0) {
+                lh_arc_seterr(IoErr());
+            } else {
+                lh_arc_seterr(ERROR_OBJECT_IN_USE);
+            }
+            return NULL;
+        }
+        lh_arc_clearerr();
+        SetIoErr(0);
+        return arc;
+    }
+    if (mode == LHARC_MODE_APPEND) {
+        arc->writer = lh_writer_open_append(arc->path, &err);
+        if (!arc->writer) {
+            free(arc);
+            lh_arc_seterr(IoErr() != 0 ? IoErr() : ERROR_OBJECT_IN_USE);
+            return NULL;
+        }
+        return arc;
+    }
+    arc->reader = lh_reader_open(arc->path, &err);
+    if (!arc->reader) {
+        free(arc);
+        lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
+        return NULL;
+    }
+    if (!lh_arc_build_catalog(arc)) {
+        lh_reader_close(&arc->reader);
+        free(arc);
+        lh_arc_seterr(ERROR_READ_PROTECTED);
+        return NULL;
+    }
+    lh_reopen_reader(arc);
+    if (lh_reader_archive_datetime(arc->reader, &arc->archive_dt)) {
+        arc->has_archive_dt = 1;
+    }
+    return arc;
+}
+
+LONG lh_arc_close(struct LhArchive *archive)
+{
+    if (!archive) {
+        return DOSFALSE;
+    }
+    if (archive->reader) {
+        lh_reader_close(&archive->reader);
+    }
+    if (archive->writer) {
+        lh_writer_close(&archive->writer);
+    }
+    lh_arc_clear_catalog(archive);
+    free(archive);
+    return DOSTRUE;
+}
+
+BPTR lh_arc_lock(struct LhArchive *archive, STRPTR name)
+{
+    struct LhLock *lock;
+
+    if (!archive) {
+        lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
+        return (BPTR)NULL;
+    }
+    lock = (struct LhLock *)calloc(1, sizeof(*lock));
+    if (!lock) {
+        lh_arc_seterr(ERROR_NO_FREE_STORE);
+        return (BPTR)NULL;
+    }
+    lock->archive = archive;
+    lock->iterate_index = -1;
+    if (!name || !name[0]) {
+        lock->entry_index = -1;
+        lock->name[0] = '\0';
+    } else {
+        lock->entry_index = lh_find_entry_index(archive, (const char *)name);
+        strncpy(lock->name, (const char *)name, sizeof(lock->name) - 1);
+        lock->name[sizeof(lock->name) - 1] = '\0';
+        if (lock->entry_index < 0) {
+            free(lock);
+            lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
+            return (BPTR)NULL;
+        }
+    }
+    return (BPTR)lock;
+}
+
+LONG lh_arc_unlock(BPTR lock_bptr)
+{
+    struct LhLock *lock;
+
+    lock = (struct LhLock *)lock_bptr;
+    if (!lock) {
+        return DOSFALSE;
+    }
+    free(lock);
+    return DOSTRUE;
+}
+
+LONG lh_arc_examine(BPTR lock_bptr, struct FileInfoBlock *fib)
+{
+    struct LhLock *lock;
+    struct LhArchive *arc;
+
+    if (!lock_bptr || !fib) {
+        return DOSFALSE;
+    }
+    lock = (struct LhLock *)lock_bptr;
+    arc = lock->archive;
+    if (!arc) {
+        return DOSFALSE;
+    }
+    if (lock->entry_index < 0) {
+        if (arc->catalog_count <= 0) {
+            return DOSFALSE;
+        }
+        lock->iterate_index = 0;
+        lh_ref_to_fib(&arc->catalog[0], fib);
+        return DOSTRUE;
+    }
+    if (lock->entry_index >= arc->catalog_count) {
+        return DOSFALSE;
+    }
+    lh_ref_to_fib(&arc->catalog[lock->entry_index], fib);
+    return DOSTRUE;
+}
+
+LONG lh_arc_exnext(BPTR lock_bptr, struct FileInfoBlock *fib)
+{
+    struct LhLock *lock;
+    struct LhArchive *arc;
+    LONG idx;
+
+    if (!lock_bptr || !fib) {
+        return DOSFALSE;
+    }
+    lock = (struct LhLock *)lock_bptr;
+    arc = lock->archive;
+    if (!arc || lock->entry_index >= 0) {
+        return DOSFALSE;
+    }
+    idx = lock->iterate_index + 1;
+    if (idx >= arc->catalog_count) {
+        return DOSFALSE;
+    }
+    lock->iterate_index = idx;
+    lh_ref_to_fib(&arc->catalog[idx], fib);
+    return DOSTRUE;
+}
+
+static ULONG lh_exall_hdrsize(LONG type)
+{
+    switch (type) {
+    case ED_NAME:
+        return 8UL;
+    case ED_TYPE:
+        return 12UL;
+    case ED_SIZE:
+        return 16UL;
+    case ED_PROTECTION:
+        return 20UL;
+    case ED_DATE:
+        return 32UL;
+    case ED_COMMENT:
+        return 36UL;
+    default:
+        return 0UL;
+    }
+}
+
+static ULONG lh_exall_reclen(LONG type, const char *name)
+{
+    ULONG hdr;
+    ULONG nlen;
+    ULONG total;
+
+    hdr = lh_exall_hdrsize(type);
+    if (hdr == 0UL || !name) {
+        return 0UL;
+    }
+    nlen = (ULONG)strlen(name) + 1UL;
+    total = hdr + nlen;
+    if (total & 1UL) {
+        total++;
+    }
+    return total;
+}
+
+static UBYTE *lh_exall_strptr(UBYTE *base, ULONG hdrsize)
+{
+    UBYTE *p;
+
+    p = base + hdrsize;
+    if (((ULONG)p) & 1UL) {
+        p++;
+    }
+    return p;
+}
+
+static LONG lh_exall_accept(struct ExAllControl *ctl, struct ExAllData *ead, LONG type)
+{
+    struct Hook *hk;
+    LONG (*func)(struct Hook *, struct ExAllData *, LONG *);
+
+    if (!ctl || !ead) {
+        return 0;
+    }
+    if (ctl->eac_MatchString && ead->ed_Name) {
+        if (!MatchPatternNoCase(ctl->eac_MatchString, ead->ed_Name)) {
+            return 0;
+        }
+    }
+    hk = ctl->eac_MatchFunc;
+    if (hk && hk->h_Entry) {
+        func = (LONG (*)(struct Hook *, struct ExAllData *, LONG *))hk->h_Entry;
+        return func(hk, ead, &type) ? 1 : 0;
+    }
+    return 1;
+}
+
+LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
+    struct ExAllControl *control)
+{
+    struct LhLock *lock;
+    struct LhArchive *arc;
+    struct ExAllData *ead;
+    struct ExAllData *prev;
+    struct lh_arc_entry_ref *ref;
+    UBYTE *bp;
+    UBYTE *bufend;
+    UBYTE *strp;
+    ULONG hdrsize;
+    ULONG reclen;
+    LONG idx;
+    LONG entries;
+    struct DateStamp ds;
+
+    if (!lock_bptr || !buffer || buf_size <= 0 || !control) {
+        lh_arc_seterr(ERROR_NO_FREE_STORE);
+        return DOSFALSE;
+    }
+    if (type < ED_NAME || type > ED_COMMENT) {
+        lh_arc_seterr(ERROR_BAD_NUMBER);
+        return DOSFALSE;
+    }
+    hdrsize = lh_exall_hdrsize(type);
+    lock = (struct LhLock *)lock_bptr;
+    if (lock->entry_index >= 0) {
+        lh_arc_seterr(ERROR_OBJECT_WRONG_TYPE);
+        return DOSFALSE;
+    }
+    if (lock->exall_aborted) {
+        lock->exall_aborted = 0;
+        lh_arc_seterr(ERROR_NO_MORE_ENTRIES);
+        control->eac_Entries = 0;
+        return DOSFALSE;
+    }
+    arc = lock->archive;
+    if (!arc) {
+        lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
+        return DOSFALSE;
+    }
+    bp = (UBYTE *)buffer;
+    bufend = bp + (ULONG)buf_size;
+    prev = NULL;
+    entries = 0;
+    idx = (LONG)control->eac_LastKey;
+
+    while (idx < arc->catalog_count) {
+        ref = &arc->catalog[idx];
+        reclen = lh_exall_reclen(type, ref->name);
+        if (reclen == 0UL || bp + reclen > bufend) {
+            if (entries == 0 && idx < arc->catalog_count) {
+                lh_arc_seterr(ERROR_LINE_TOO_LONG);
+                control->eac_Entries = 0;
+                control->eac_LastKey = (ULONG)idx;
+                return DOSFALSE;
+            }
+            break;
+        }
+        ead = (struct ExAllData *)bp;
+        memset(ead, 0, hdrsize);
+        strp = lh_exall_strptr(bp, hdrsize);
+        strcpy((char *)strp, ref->name);
+        ead->ed_Name = (UBYTE *)strp;
+        if (type >= ED_TYPE) {
+            ead->ed_Type = ref->is_directory ? ST_USERDIR : ST_FILE;
+        }
+        if (type >= ED_SIZE) {
+            ead->ed_Size = ref->orig;
+        }
+        if (type >= ED_PROTECTION) {
+            ead->ed_Prot = (ULONG)ref->attrs;
+        }
+        if (type >= ED_DATE) {
+            lh_dt_to_datestamp(&ref->dt, &ds);
+            ead->ed_Days = (ULONG)ds.ds_Days;
+            ead->ed_Mins = (ULONG)ds.ds_Minute;
+            ead->ed_Ticks = (ULONG)ds.ds_Tick;
+        }
+        if (type >= ED_COMMENT) {
+            ead->ed_Comment = NULL;
+        }
+        if (!lh_exall_accept(control, ead, type)) {
+            idx++;
+            continue;
+        }
+        ead->ed_Next = NULL;
+        if (prev) {
+            prev->ed_Next = ead;
+        }
+        prev = ead;
+        bp += reclen;
+        entries++;
+        idx++;
+    }
+
+    control->eac_Entries = (ULONG)entries;
+    control->eac_LastKey = (ULONG)idx;
+    if (idx >= arc->catalog_count) {
+        lh_arc_seterr(ERROR_NO_MORE_ENTRIES);
+        return DOSFALSE;
+    }
+    return DOSTRUE;
+}
+
+LONG lh_arc_exall_end(BPTR lock_bptr)
+{
+    struct LhLock *lock;
+
+    lock = (struct LhLock *)lock_bptr;
+    if (!lock) {
+        return DOSFALSE;
+    }
+    lock->exall_aborted = 1;
+    return DOSTRUE;
+}
+
+LONG lh_arc_info(BPTR lock_bptr, struct InfoData *info)
+{
+    struct LhLock *lock;
+    struct LhArchive *arc;
+    LONG i;
+    unsigned long total;
+
+    if (!lock_bptr || !info) {
+        return DOSFALSE;
+    }
+    lock = (struct LhLock *)lock_bptr;
+    arc = lock->archive;
+    if (!arc) {
+        return DOSFALSE;
+    }
+    memset(info, 0, sizeof(*info));
+    total = 0;
+    for (i = 0; i < arc->catalog_count; i++) {
+        total += arc->catalog[i].orig;
+    }
+    info->id_DiskState = ID_VALIDATED;
+    info->id_DiskType = ID_DOS_DISK;
+    info->id_BytesPerBlock = 512;
+    info->id_NumBlocks = (LONG)((total + 511UL) / 512UL);
+    info->id_NumBlocksUsed = info->id_NumBlocks;
+    info->id_InUse = DOSTRUE;
+    return DOSTRUE;
+}
+
+LONG lh_arc_name_from_lock(BPTR lock_bptr, STRPTR buffer, LONG len)
+{
+    struct LhLock *lock;
+    struct LhArchive *arc;
+
+    if (!lock_bptr || !buffer || len <= 0) {
+        return 0;
+    }
+    lock = (struct LhLock *)lock_bptr;
+    arc = lock->archive;
+    if (!arc) {
+        buffer[0] = '\0';
+        return 0;
+    }
+    if (lock->entry_index < 0) {
+        strncpy(buffer, arc->path, (size_t)len - 1);
+    } else {
+        strncpy(buffer, lock->name, (size_t)len - 1);
+    }
+    buffer[len - 1] = '\0';
+    return (LONG)strlen((char *)buffer);
+}
+
+BPTR lh_arc_open_from_lock(BPTR lock_bptr, LONG mode)
+{
+    struct LhLock *lock;
+    struct LhArchive *arc;
+    struct LhFileHandle *fh;
+    int crc_ok;
+
+    (void)mode;
+    if (!lock_bptr) {
+        return (BPTR)NULL;
+    }
+    lock = (struct LhLock *)lock_bptr;
+    arc = lock->archive;
+    if (!arc || lock->entry_index < 0) {
+        return (BPTR)NULL;
+    }
+    if (arc->catalog[lock->entry_index].is_directory) {
+        return (BPTR)NULL;
+    }
+    fh = (struct LhFileHandle *)calloc(1, sizeof(*fh));
+    if (!fh) {
+        return (BPTR)NULL;
+    }
+    fh->lock = lock;
+    fh->owns_lock = 0;
+    lh_reopen_reader(arc);
+    if (!lh_read_entry_at_index(arc, lock->entry_index,
+            &fh->data, &fh->size, &crc_ok)) {
+        free(fh);
+        return (BPTR)NULL;
+    }
+    /*
+     * Reject handles with no payload when the catalog shows a non-empty file.
+     * This catches stale lh.library builds and decompression failures that
+     * would otherwise yield a zero-length LhRead loop.
+     */
+    if ((!fh->data || fh->size == 0)
+        && lock->entry_index >= 0
+        && lock->entry_index < arc->catalog_count
+        && arc->catalog[lock->entry_index].orig > 0) {
+        free(fh->data);
+        free(fh);
+        lh_arc_seterr(ERROR_OBJECT_WRONG_TYPE);
+        return (BPTR)NULL;
+    }
+    fh->pos = 0;
+    fh->writable = 0;
+    lh_arc_clearerr();
+    return (BPTR)fh;
+}
+
+static int lh_arc_mkdir_chain(STRPTR dirpath)
+{
+    char buf[512];
+    char *p;
+    BPTR lock;
+
+    if (!dirpath || !dirpath[0]) {
+        return 1;
+    }
+    strncpy(buf, (const char *)dirpath, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    for (p = buf + 1; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            *p = '\0';
+            lock = CreateDir((STRPTR)buf);
+            if (lock == (BPTR)NULL && IoErr() != ERROR_OBJECT_EXISTS) {
+                return 0;
+            }
+            if (lock != (BPTR)NULL) {
+                UnLock(lock);
+            }
+            *p = '/';
+        }
+    }
+    lock = CreateDir((STRPTR)buf);
+    if (lock == (BPTR)NULL && IoErr() != ERROR_OBJECT_EXISTS) {
+        return 0;
+    }
+    if (lock != (BPTR)NULL) {
+        UnLock(lock);
+    }
+    return 1;
+}
+
+static int lh_arc_ensure_parent(STRPTR path)
+{
+    char buf[512];
+    STRPTR pp;
+    STRPTR p;
+
+    if (!path || !path[0]) {
+        return 0;
+    }
+    strncpy(buf, (const char *)path, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+    pp = PathPart((STRPTR)buf);
+    if (!pp || pp == (STRPTR)buf) {
+        return 1;
+    }
+    *pp = '\0';
+    if (buf[0] == '\0') {
+        return 1;
+    }
+    p = (STRPTR)buf;
+    while (*p) {
+        p++;
+    }
+    if (p > (STRPTR)buf && *(p - 1) == ':') {
+        return 1;
+    }
+    return lh_arc_mkdir_chain((STRPTR)buf);
+}
+
+/*
+ * Decompress one entry.  Returns byte count in d0, or -1 on error.
+ * *DataOut receives AllocMem data (caller FreeMem).  Size is only in d0
+ * because SAS/C #pragma libcall does not reliably write a3 output args.
+ */
+LONG lh_arc_read_data(struct LhArchive *arc, STRPTR name, APTR *data_out)
+{
+    unsigned char *data;
+    unsigned long sz;
+    APTR copy;
+    int crc_ok;
+
+    if (!arc || !name || !data_out) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return -1L;
+    }
+    *data_out = NULL;
+    lh_reopen_reader(arc);
+    if (!lh_read_entry_data(arc, (const char *)name, &data, &sz, &crc_ok)) {
+        lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
+        return -1L;
+    }
+    if (!data || sz == 0) {
+        if (data) {
+            free(data);
+        }
+        lh_arc_seterr(ERROR_OBJECT_WRONG_TYPE);
+        return -1L;
+    }
+    copy = AllocMem((ULONG)sz, MEMF_ANY);
+    if (!copy) {
+        free(data);
+        lh_arc_seterr(ERROR_NO_FREE_STORE);
+        return -1L;
+    }
+    CopyMem((APTR)data, copy, (ULONG)sz);
+    free(data);
+    *data_out = copy;
+    lh_arc_clearerr();
+    return (LONG)sz;
+}
+
+LONG lh_arc_extract_entry(struct LhArchive *arc, STRPTR name, STRPTR dest)
+{
+    APTR data;
+    LONG len;
+    BPTR fh;
+    LONG wrote;
+
+    if (!arc || !name || !dest) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return DOSFALSE;
+    }
+    len = lh_arc_read_data(arc, name, &data);
+    if (len < 0) {
+        return DOSFALSE;
+    }
+    if (!lh_arc_ensure_parent(dest)) {
+        FreeMem(data, (ULONG)len);
+        lh_arc_seterr(ERROR_OBJECT_IN_USE);
+        return DOSFALSE;
+    }
+    fh = Open(dest, MODE_NEWFILE);
+    if (fh == (BPTR)NULL) {
+        FreeMem(data, (ULONG)len);
+        lh_arc_seterr(IoErr());
+        return DOSFALSE;
+    }
+    wrote = Write(fh, data, len);
+    Close(fh);
+    FreeMem(data, (ULONG)len);
+    if (wrote != len) {
+        DeleteFile(dest);
+        lh_arc_seterr(IoErr());
+        return DOSFALSE;
+    }
+    lh_arc_clearerr();
+    return DOSTRUE;
+}
+
+LONG lh_arc_test_entry(struct LhArchive *arc, STRPTR name)
+{
+    APTR data;
+    LONG len;
+
+    len = lh_arc_read_data(arc, name, &data);
+    if (len < 0) {
+        return -1L;
+    }
+    FreeMem(data, (ULONG)len);
+    return len;
+}
+
+LONG lh_arc_print_entry(struct LhArchive *arc, STRPTR name)
+{
+    APTR data;
+    LONG len;
+    BPTR outfh;
+    LONG wrote;
+
+    len = lh_arc_read_data(arc, name, &data);
+    if (len < 0) {
+        return DOSFALSE;
+    }
+    outfh = Output();
+    if (outfh == (BPTR)NULL) {
+        FreeMem(data, (ULONG)len);
+        lh_arc_seterr(ERROR_OBJECT_IN_USE);
+        return DOSFALSE;
+    }
+    if (len > 0) {
+        wrote = Write(outfh, data, len);
+        if (wrote != len) {
+            FreeMem(data, (ULONG)len);
+            lh_arc_seterr(IoErr());
+            return DOSFALSE;
+        }
+    }
+    FreeMem(data, (ULONG)len);
+    lh_arc_clearerr();
+    return DOSTRUE;
+}
+
+BPTR lh_arc_open_entry(struct LhArchive *archive, STRPTR name, LONG mode)
+{
+    BPTR lock;
+    BPTR fh;
+
+    lock = lh_arc_lock(archive, name);
+    if (!lock) {
+        return (BPTR)NULL;
+    }
+    fh = lh_arc_open_from_lock(lock, mode);
+    if (!fh) {
+        lh_arc_unlock(lock);
+        return (BPTR)NULL;
+    }
+    ((struct LhFileHandle *)fh)->owns_lock = 1;
+    return fh;
+}
+
+LONG lh_arc_read(BPTR fh_bptr, APTR buffer, LONG len)
+{
+    struct LhFileHandle *fh;
+    unsigned long avail;
+    unsigned long n;
+
+    if (!fh_bptr || !buffer || len <= 0) {
+        return -1;
+    }
+    fh = (struct LhFileHandle *)fh_bptr;
+    if (!fh->data || fh->pos >= fh->size) {
+        return 0;
+    }
+    avail = fh->size - fh->pos;
+    n = (unsigned long)len;
+    if (n > avail) {
+        n = avail;
+    }
+    memcpy(buffer, fh->data + fh->pos, n);
+    fh->pos += n;
+    return (LONG)n;
+}
+
+LONG lh_arc_write(BPTR fh_bptr, APTR buffer, LONG len)
+{
+    (void)fh_bptr;
+    (void)buffer;
+    (void)len;
+    return -1;
+}
+
+LONG lh_arc_closefh(BPTR fh_bptr)
+{
+    struct LhFileHandle *fh;
+
+    if (!fh_bptr) {
+        return DOSFALSE;
+    }
+    fh = (struct LhFileHandle *)fh_bptr;
+    if (fh->lock && fh->owns_lock) {
+        lh_arc_unlock((BPTR)fh->lock);
+        fh->lock = NULL;
+    }
+    free(fh->data);
+    free(fh);
+    return DOSTRUE;
+}
+
+LONG lh_arc_seek(BPTR fh_bptr, LONG position, LONG mode)
+{
+    struct LhFileHandle *fh;
+    unsigned long newpos;
+
+    if (!fh_bptr) {
+        return -1;
+    }
+    fh = (struct LhFileHandle *)fh_bptr;
+    if (mode == OFFSET_BEGINNING) {
+        newpos = (unsigned long)position;
+    } else if (mode == OFFSET_CURRENT) {
+        if (position < 0 && (unsigned long)(-position) > fh->pos) {
+            return -1;
+        }
+        newpos = fh->pos + (unsigned long)position;
+    } else if (mode == OFFSET_END) {
+        if (position > 0) {
+            return -1;
+        }
+        if ((unsigned long)(-position) > fh->size) {
+            return -1;
+        }
+        newpos = fh->size - (unsigned long)(-position);
+    } else {
+        return -1;
+    }
+    if (newpos > fh->size) {
+        return -1;
+    }
+    fh->pos = newpos;
+    return (LONG)newpos;
+}
+
+LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG len)
+{
+    lh_status st;
+    lh_datetime dt;
+
+    if (!archive || !archive->writer || !name) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return DOSFALSE;
+    }
+    if (len > 0 && data == NULL) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return DOSFALSE;
+    }
+    lh_datetime_from_time_t(&dt, 0);
+    st = lh_writer_add(archive->writer, (const char *)name, NULL,
+        LH_ATTR_DEFAULT, &dt, LH_LEVEL_STORE, 0,
+        (const unsigned char *)data, (size_t)len);
+    if (st != LH_OK) {
+        if (st == LH_ERR_NO_MEMORY) {
+            lh_arc_seterr(ERROR_NO_FREE_STORE);
+        } else if (st == LH_ERR_IO && IoErr() != 0) {
+            lh_arc_seterr(IoErr());
+        } else {
+            lh_arc_seterr(ERROR_WRITE_PROTECTED);
+        }
+        return DOSFALSE;
+    }
+    lh_arc_clearerr();
+    SetIoErr(0);
+    return DOSTRUE;
+}
+
+static int lh_keep_not_name(const lh_entry *entry, void *ctx)
+{
+    const char *name;
+
+    name = (const char *)ctx;
+    if (!entry || !entry->filename || !name) {
+        return 0;
+    }
+    return strcmp(entry->filename, name) != 0;
+}
+
+LONG lh_arc_delete_entry(struct LhArchive *archive, STRPTR name)
+{
+    lh_status st;
+    int had_reader;
+
+    if (!archive || !name) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return DOSFALSE;
+    }
+    had_reader = (archive->reader != NULL) ? 1 : 0;
+    if (had_reader) {
+        lh_reader_close(&archive->reader);
+    }
+    st = lh_archive_rewrite(archive->path, lh_keep_not_name, (void *)name,
+        1, LH_LEVEL_STORE, 0);
+    if (st != LH_OK) {
+        if (had_reader) {
+            archive->reader = lh_reader_open(archive->path, &st);
+            if (archive->reader) {
+                lh_arc_build_catalog(archive);
+                lh_reopen_reader(archive);
+            }
+        }
+        if (st == LH_ERR_NO_MEMORY) {
+            lh_arc_seterr(ERROR_NO_FREE_STORE);
+        } else if (st == LH_ERR_IO && IoErr() != 0) {
+            lh_arc_seterr(IoErr());
+        } else {
+            lh_arc_seterr(ERROR_WRITE_PROTECTED);
+        }
+        return DOSFALSE;
+    }
+    if (had_reader) {
+        st = LH_OK;
+        archive->reader = lh_reader_open(archive->path, &st);
+        if (!archive->reader || !lh_arc_build_catalog(archive)) {
+            lh_arc_seterr(ERROR_READ_PROTECTED);
+            return DOSFALSE;
+        }
+        lh_reopen_reader(archive);
+    }
+    lh_arc_clearerr();
+    SetIoErr(0);
+    return DOSTRUE;
+}
+
+LONG lh_arc_concat(struct LhArchive *dest, STRPTR source_path)
+{
+    struct LhArchive *src;
+    LONG i;
+    unsigned char *data;
+    unsigned long len;
+    int crc_ok;
+
+    if (!dest || !dest->writer || !source_path) {
+        return DOSFALSE;
+    }
+    src = lh_arc_open(source_path, LHARC_MODE_READ);
+    if (!src) {
+        return DOSFALSE;
+    }
+    for (i = 0; i < src->catalog_count; i++) {
+        if (src->catalog[i].is_directory) {
+            continue;
+        }
+        lh_reopen_reader(src);
+        data = NULL;
+        len = 0;
+        if (!lh_read_entry_data(src, src->catalog[i].name, &data, &len, &crc_ok)) {
+            lh_arc_close(src);
+            return DOSFALSE;
+        }
+        if (!lh_arc_add_entry(dest, (STRPTR)src->catalog[i].name, data, (LONG)len)) {
+            free(data);
+            lh_arc_close(src);
+            return DOSFALSE;
+        }
+        free(data);
+    }
+    lh_arc_close(src);
+    return DOSTRUE;
+}
+
+LONG lh_arc_set_password(struct LhArchive *archive, STRPTR password)
+{
+    if (!archive) {
+        return DOSFALSE;
+    }
+    archive->has_password = 0;
+    archive->password[0] = '\0';
+    if (password && password[0]) {
+        strncpy(archive->password, (const char *)password,
+            sizeof(archive->password) - 1);
+        archive->password[sizeof(archive->password) - 1] = '\0';
+        archive->has_password = 1;
+        if (archive->reader) {
+            lh_reader_set_password(archive->reader, archive->password);
+        }
+    }
+    return DOSTRUE;
+}

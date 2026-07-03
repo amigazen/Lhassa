@@ -1,0 +1,114 @@
+#
+# Source/lib_source/smakefile - lh.library (Amiga-native shell + pooled core)
+#
+# Core I/O: dos.library (lh_archive.c lh_stream).  No stdio/stdlib in library.
+# DEF=AMIGA -> LH_AMIGA per src/lh_platform.h and LIBC_TO_AMIGA.md.
+#
+# Targets:
+#   smake          -> lh.library (shared)
+#   smake static   -> lh.lib  (static core, LH_SOLO)
+#
+
+CC      = sc
+LD      = slink
+OML     = oml
+RM      = delete force quiet
+
+TARGET  = lh.library
+STATIC  = lh.lib
+BUILD_H = private/lh_build.h
+
+LHINCL  = idir=/include idir=/src DEF=AMIGA
+LHSOLO  = idir=/include idir=/src DEF=AMIGA DEF=LH_SOLO
+
+SHELL_OBJS = StartUp.o LibInit.o malloc.o lh_lvo.o lh_archive_dos.o
+
+CORE_OBJS = \
+    lh_error.o lh_crc.o lh_crypto.o lh_datetime.o \
+    lh_codec.o lh_lh5dec.o lh_header.o lh_archive.o lh_buffer.o
+
+LIB_OBJS = $(SHELL_OBJS) $(CORE_OBJS)
+
+STATIC_OBJS = lh_error_s.o lh_crc_s.o lh_codec_s.o lh_buffer_s.o
+
+all: $(TARGET)
+
+static: $(STATIC)
+
+rebuild: clean all
+
+$(TARGET): $(LIB_OBJS) smakefile.wth $(BUILD_H)
+	$(LD) WITH smakefile.wth WITH LIB:utillib.with
+
+$(STATIC): $(STATIC_OBJS)
+	$(OML) $(STATIC) r $(STATIC_OBJS)
+
+StartUp.o: StartUp.c $(BUILD_H) lh_funcs.h compiler.h
+	$(CC) StartUp.c
+
+LibInit.o: LibInit.c $(BUILD_H) compiler.h
+	$(CC) LibInit.c
+
+malloc.o: malloc.c
+	$(CC) malloc.c
+
+lh_lvo.o: lh_lvo.c lh_funcs.h compiler.h lh_archive_dos.h
+	$(CC) $(LHINCL) lh_lvo.c
+
+lh_archive_dos.o: lh_archive_dos.c lh_archive_dos.h
+	$(CC) $(LHINCL) lh_archive_dos.c
+
+lh_error.o: /src/lh_error.c
+	$(CC) $(LHINCL) /src/lh_error.c OBJNAME=lh_error.o
+
+lh_crc.o: /src/lh_crc.c
+	$(CC) $(LHINCL) /src/lh_crc.c OBJNAME=lh_crc.o
+
+lh_crypto.o: /src/lh_crypto.c
+	$(CC) $(LHINCL) /src/lh_crypto.c OBJNAME=lh_crypto.o
+
+lh_datetime.o: /src/lh_datetime.c
+	$(CC) $(LHINCL) /src/lh_datetime.c OBJNAME=lh_datetime.o
+
+lh_codec.o: /src/lh_codec.c
+	$(CC) $(LHINCL) /src/lh_codec.c OBJNAME=lh_codec.o
+
+lh_lh5dec.o: /src/lh_lh5dec.c
+	$(CC) $(LHINCL) /src/lh_lh5dec.c OBJNAME=lh_lh5dec.o
+
+lh_header.o: /src/lh_header.c
+	$(CC) $(LHINCL) /src/lh_header.c OBJNAME=lh_header.o
+
+lh_archive.o: /src/lh_archive.c
+	$(CC) $(LHINCL) /src/lh_archive.c OBJNAME=lh_archive.o
+
+lh_buffer.o: /src/lh_buffer.c
+	$(CC) $(LHINCL) /src/lh_buffer.c OBJNAME=lh_buffer.o
+
+lh_error_s.o: /src/lh_error.c
+	$(CC) $(LHSOLO) /src/lh_error.c OBJNAME=lh_error_s.o
+
+lh_crc_s.o: /src/lh_crc.c
+	$(CC) $(LHSOLO) /src/lh_crc.c OBJNAME=lh_crc_s.o
+
+lh_codec_s.o: /src/lh_codec.c
+	$(CC) $(LHSOLO) /src/lh_codec.c OBJNAME=lh_codec_s.o
+
+lh_buffer_s.o: /src/lh_buffer.c
+	$(CC) $(LHSOLO) /src/lh_buffer.c OBJNAME=lh_buffer_s.o
+
+clean:
+	$(RM) $(LIB_OBJS) $(STATIC_OBJS) $(TARGET) $(STATIC)
+
+install: all
+	copy $(TARGET) SDK:Libs/$(TARGET)
+
+# Canonical client headers: //SDK/Include_h (not Source/include, which is engine-only).
+headers:
+	Copy clone //SDK/Include_h/libraries/lhlib.h /include/libraries/lhlib.h
+	Copy clone //SDK/Include_h/clib/lh_protos.h /include/clib/lh_protos.h
+	Copy clone //SDK/Include_h/pragmas/lh_pragmas.h /include/pragmas/lh_pragmas.h
+	Copy clone //SDK/Include_h/pragma/lh_lib.h /include/pragma/lh_lib.h
+	Copy clone //SDK/Include_h/inline/lh.h /include/inline/lh.h
+	Copy clone //SDK/Include_h/inline/lh_protos.h /include/inline/lh_protos.h
+	Copy clone //SDK/Include_h/proto/lh.h /include/proto/lh.h
