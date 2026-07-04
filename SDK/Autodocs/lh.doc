@@ -215,6 +215,13 @@ lh.library/LhErr
 
    EXAMPLE
 
+       struct LhBuffer *buf;
+
+       buf = CreateBuffer(FALSE);
+       if (!buf) {
+           /* allocation failed */
+       }
+
    NOTES
 
    BUGS
@@ -243,6 +250,9 @@ lh.library/LhErr
        None.
 
    EXAMPLE
+
+       DeleteBuffer(buf);
+       buf = NULL;
 
    NOTES
 
@@ -277,6 +287,16 @@ lh.library/LhErr
 
    EXAMPLE
 
+       static UBYTE plain[] = "sample payload";
+       static UBYTE comp[128];
+       ULONG n;
+
+       buf->lh_Src = plain;
+       buf->lh_SrcSize = (ULONG)(sizeof(plain) - 1);
+       buf->lh_Dst = comp;
+       buf->lh_DstSize = (ULONG)sizeof(comp);
+       n = LhEncode(buf);
+
    NOTES
 
    BUGS
@@ -306,6 +326,12 @@ lh.library/LhErr
        size - decompressed size, or 0 on error.
 
    EXAMPLE
+
+       buf->lh_Src = comp;
+       buf->lh_SrcSize = n;
+       buf->lh_Dst = plain;
+       buf->lh_DstSize = original_len;
+       n = LhDecode(buf);
 
    NOTES
 
@@ -337,6 +363,10 @@ lh.library/LhErr
 
    EXAMPLE
 
+       ULONG n;
+
+       n = LhCompress(0L, buf);   /* 0 = lh0 / store */
+
    NOTES
 
    BUGS
@@ -366,6 +396,10 @@ lh.library/LhErr
        size - decompressed size, or 0 on error.
 
    EXAMPLE
+
+       ULONG n;
+
+       n = LhDecompress(0L, buf);
 
    NOTES
 
@@ -403,6 +437,13 @@ lh.library/LhErr
 
    EXAMPLE
 
+       struct LhArchive *arc;
+
+       arc = LhOpenArchive("RAM:Archive.lha", LHARC_MODE_READ);
+       if (!arc) {
+           Printf("open failed, LhErr %ld\n", LhErr());
+       }
+
    NOTES
 
    BUGS
@@ -431,6 +472,11 @@ lh.library/LhErr
        success - DOSTRUE on success, DOSFALSE on failure.
 
    EXAMPLE
+
+       if (!LhCloseArchive(arc)) {
+           Printf("close failed, LhErr %ld\n", LhErr());
+       }
+       arc = NULL;
 
    NOTES
 
@@ -466,6 +512,11 @@ lh.library/LhErr
 
    EXAMPLE
 
+       BPTR lock;
+
+       lock = LhLock(arc, "");              /* archive root */
+       lock = LhLock(arc, "readme.txt");    /* one entry */
+
    NOTES
 
    BUGS
@@ -495,6 +546,8 @@ lh.library/LhErr
        success - DOSTRUE on success, DOSFALSE on failure.
 
    EXAMPLE
+
+       LhUnLock(lock);
 
    NOTES
 
@@ -529,6 +582,14 @@ lh.library/LhErr
 
    EXAMPLE
 
+       struct FileInfoBlock *fib;
+
+       fib = (struct FileInfoBlock *)AllocMem(
+           (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+       if (LhExamine(lock, fib)) {
+           Printf("%s\n", fib->fib_FileName);
+       }
+
    NOTES
 
    BUGS
@@ -559,6 +620,10 @@ lh.library/LhErr
        success - DOSTRUE if another entry was returned, DOSFALSE at end.
 
    EXAMPLE
+
+       while (LhExNext(lock, fib)) {
+           Printf("%8ld  %s\n", fib->fib_Size, fib->fib_FileName);
+       }
 
    NOTES
 
@@ -604,6 +669,16 @@ lh.library/LhErr
 
    EXAMPLE
 
+       struct ExAllControl ctl;
+       UBYTE buf[2048];
+
+       memset(&ctl, 0, sizeof(ctl));
+       ctl.eac_LastKey = 0;
+       while (LhExAll(lock, (STRPTR)buf, (LONG)sizeof(buf),
+           ED_NAME, &ctl)) {
+           /* walk ExAllData records in buf */
+       }
+
    NOTES
 
    BUGS
@@ -633,6 +708,8 @@ lh.library/LhErr
        success - DOSTRUE on success, DOSFALSE on failure.
 
    EXAMPLE
+
+       LhExAllEnd(lock);   /* abort an in-progress LhExAll scan */
 
    NOTES
 
@@ -664,6 +741,12 @@ lh.library/LhErr
        success - DOSTRUE on success, DOSFALSE on failure.
 
    EXAMPLE
+
+       struct InfoData info;
+
+       if (LhInfo(lock, &info)) {
+           Printf("blocks used %ld\n", info.id_NumBlocksUsed);
+       }
 
    NOTES
 
@@ -699,6 +782,11 @@ lh.library/LhErr
 
    EXAMPLE
 
+       BPTR fh;
+
+       fh = LhOpenFromLock(elock, MODE_OLDFILE);
+       /* caller still LhUnLock(elock) after LhClose(fh) */
+
    NOTES
 
    BUGS
@@ -731,6 +819,13 @@ lh.library/LhErr
 
    EXAMPLE
 
+       BPTR fh;
+
+       fh = LhOpen(arc, "readme.txt", MODE_OLDFILE);
+       if (!fh) {
+           Printf("open failed, LhErr %ld\n", LhErr());
+       }
+
    NOTES
 
    BUGS
@@ -761,6 +856,16 @@ lh.library/LhErr
        count - bytes read, 0 at EOF, or -1 on error.
 
    EXAMPLE
+
+       UBYTE buf[256];
+       LONG n;
+
+       n = LhRead(fh, buf, (LONG)sizeof(buf));
+       if (n < 0) {
+           /* read error */
+       } else if (n == 0) {
+           /* end of file */
+       }
 
    NOTES
 
@@ -796,6 +901,11 @@ lh.library/LhErr
 
    EXAMPLE
 
+       LONG n;
+
+       n = LhWrite(fh, data, (LONG)data_len);
+       /* read-only handles return -1 */
+
    NOTES
 
    BUGS
@@ -826,6 +936,8 @@ lh.library/LhErr
        success - DOSTRUE on success, DOSFALSE on failure.
 
    EXAMPLE
+
+       LhClose(fh);
 
    NOTES
 
@@ -858,6 +970,11 @@ lh.library/LhErr
 
    EXAMPLE
 
+       LONG pos;
+
+       pos = LhSeek(fh, 0L, OFFSET_BEGINNING);
+       pos = LhSeek(fh, 0L, OFFSET_END);
+
    NOTES
 
    BUGS
@@ -888,6 +1005,12 @@ lh.library/LhErr
        len - strlen of the name written, or 0 on failure.
 
    EXAMPLE
+
+       TEXT name[256];
+
+       if (LhNameFromLock(lock, name, (LONG)sizeof(name)) > 0) {
+           Printf("%s\n", name);
+       }
 
    NOTES
 
@@ -924,6 +1047,12 @@ lh.library/LhErr
 
    EXAMPLE
 
+       static STRPTR payload = (STRPTR)"hello";
+
+       arc = LhOpenArchive("RAM:New.lha", LHARC_MODE_WRITE);
+       LhAddEntry(arc, "greeting.txt", payload, 5L);
+       LhCloseArchive(arc);
+
    NOTES
 
    BUGS
@@ -957,6 +1086,10 @@ lh.library/LhErr
 
    EXAMPLE
 
+       if (!LhDeleteFile(arc, "obsolete.txt")) {
+           Printf("delete failed, LhErr %ld\n", LhErr());
+       }
+
    NOTES
 
    BUGS
@@ -987,6 +1120,10 @@ lh.library/LhErr
 
    EXAMPLE
 
+       if (!LhConcatArchive(arc, "RAM:Donor.lha")) {
+           Printf("concat failed, LhErr %ld\n", LhErr());
+       }
+
    NOTES
 
    BUGS
@@ -1016,6 +1153,10 @@ lh.library/LhErr
        success - DOSTRUE on success, DOSFALSE on failure.
 
    EXAMPLE
+
+       LhSetPassword(arc, "secret");
+       /* ... read encrypted entries ... */
+       LhSetPassword(arc, "");   /* clear */
 
    NOTES
 
@@ -1052,6 +1193,16 @@ lh.library/LhErr
 
    EXAMPLE
 
+       APTR data;
+       LONG len;
+
+       data = NULL;
+       len = LhReadData(arc, "readme.txt", &data);
+       if (len >= 0 && data) {
+           /* use data[0 .. len-1] */
+           FreeMem(data, (ULONG)len);
+       }
+
    NOTES
 
    BUGS
@@ -1085,6 +1236,10 @@ lh.library/LhErr
 
    EXAMPLE
 
+       if (!LhExtractEntry(arc, "readme.txt", "RAM:Out/readme.txt")) {
+           Printf("extract failed, LhErr %ld\n", LhErr());
+       }
+
    NOTES
 
    BUGS
@@ -1114,6 +1269,13 @@ lh.library/LhErr
        len - decompressed byte count on success, or -1 on error.
 
    EXAMPLE
+
+       LONG len;
+
+       len = LhTestEntry(arc, "readme.txt");
+       if (len < 0) {
+           Printf("test failed, LhErr %ld\n", LhErr());
+       }
 
    NOTES
 
@@ -1145,6 +1307,8 @@ lh.library/LhErr
 
    EXAMPLE
 
+       LhPrintEntry(arc, "readme.txt");   /* writes to Output() */
+
    NOTES
 
    BUGS
@@ -1174,6 +1338,11 @@ lh.library/LhErr
        code - last error code, or 0 if none.
 
    EXAMPLE
+
+       arc = LhOpenArchive("nope.lha", LHARC_MODE_READ);
+       if (!arc) {
+           Printf("LhErr %ld\n", LhErr());
+       }
 
    NOTES
 
