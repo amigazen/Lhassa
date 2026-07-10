@@ -14,14 +14,17 @@
 #ifndef LH_PLATFORM_H
 #define LH_PLATFORM_H
 
-#if defined(LH_AMIGA) && (defined(LH_HOST) || defined(HOST))
-#error "lh core: LH_AMIGA and LH_HOST/HOST are mutually exclusive"
+/*
+ * Amiga SAS/C (DEF=AMIGA / __SASC) always wins.  Preferring HOST first let a
+ * leaked HOST define strip DateStamp helpers from the library core.
+ */
+#if defined(__AMIGA) || defined(__SASC) || defined(__AMIGADATE__) || defined(AMIGA)
+#if defined(HOST) || defined(LH_HOST)
+#error "lh core: HOST is incompatible with Amiga SAS/C build (use DEF=AMIGA only)"
 #endif
-
-#if defined(HOST)
-#define LH_HOST 1
-#elif defined(__AMIGA) || defined(__SASC) || defined(__AMIGADATE__) || defined(AMIGA)
 #define LH_AMIGA 1
+#elif defined(HOST)
+#define LH_HOST 1
 #endif
 
 #endif /* LH_PLATFORM_H */

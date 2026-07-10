@@ -13,7 +13,6 @@
 #endif /* CLIB_LH_PROTOS_H */
 
 /* "lh.library" */
-/*--- functions in V2 or higher --- */
 
 /* Classic LhLib API (Holger Krekel 1990) + extended codec */
 
@@ -21,6 +20,7 @@
 #pragma amicall(LhBase, 0x24, DeleteBuffer(a0))
 #pragma amicall(LhBase, 0x2A, LhEncode(a0))
 #pragma amicall(LhBase, 0x30, LhDecode(a0))
+/*--- functions in V2 or higher --- */
 #pragma amicall(LhBase, 0x36, LhCompress(d0,a0))
 #pragma amicall(LhBase, 0x3C, LhDecompress(d0,a0))
 
@@ -43,13 +43,17 @@
 #pragma amicall(LhBase, 0x96, LhSeek(d1,d2,d0))
 #pragma amicall(LhBase, 0x9C, LhNameFromLock(a0,a1,d0))
 #pragma amicall(LhBase, 0xA2, LhAddEntry(a0,a1,a2,d0))
-#pragma amicall(LhBase, 0xA8, LhDeleteFile(a0,a1))
-#pragma amicall(LhBase, 0xAE, LhConcatArchive(a0,a1))
-#pragma amicall(LhBase, 0xB4, LhSetPassword(a0,a1))
-#pragma amicall(LhBase, 0xBA, LhReadData(a0,a1,a2))
-#pragma amicall(LhBase, 0xC0, LhExtractEntry(a0,a1,a2))
-#pragma amicall(LhBase, 0xC6, LhTestEntry(a0,a1))
-#pragma amicall(LhBase, 0xCC, LhPrintEntry(a0,a1))
-#pragma amicall(LhBase, 0xD2, LhErr())
+#pragma amicall(LhBase, 0xA8, LhAddEntryTagList(a0,a1,a2,d0,a3))
+#if defined(__STORM__)
+#pragma tagcall(LhBase, 0xA8, LhAddEntryTags(a0,a1,a2,d0,a3))
+#endif /* __STORM__ */
+#pragma amicall(LhBase, 0xAE, LhDeleteFile(a0,a1))
+#pragma amicall(LhBase, 0xB4, LhConcatArchive(a0,a1))
+#pragma amicall(LhBase, 0xBA, LhSetPassword(a0,a1))
+#pragma amicall(LhBase, 0xC0, LhReadData(a0,a1,a2))
+#pragma amicall(LhBase, 0xC6, LhExtractEntry(a0,a1,a2))
+#pragma amicall(LhBase, 0xCC, LhTestEntry(a0,a1))
+#pragma amicall(LhBase, 0xD2, LhPrintEntry(a0,a1))
+#pragma amicall(LhBase, 0xD8, LhErr())
 
 #endif /* PRAGMA_LH_LIB_H */

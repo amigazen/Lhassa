@@ -22,6 +22,10 @@
 #include <dos/exall.h>
 #endif
 
+#ifndef UTILITY_TAGITEM_H
+#include <utility/tagitem.h>
+#endif
+
 #define LH_NAME         "lh.library"
 #define LH_VERSION      2
 #define LH_MIN_VERSION  2
@@ -51,5 +55,17 @@ struct LhArchive;
 #define LHARC_MODE_READ   MODE_OLDFILE
 #define LHARC_MODE_WRITE  MODE_NEWFILE
 #define LHARC_MODE_APPEND 1007L
+
+/*
+ * LhAddEntryTagList / LhAddEntryTags tags.  Defaults without tags: LH0/store,
+ * LH_ATTR_DEFAULT (0 = ----rwed), current DateStamp, no comment.  Nested
+ * names use header level 2 with path extension type 2.  LhAddEntryTags is
+ * the ==varargs alias (same LVO).  Use LHADD_Method for lh5/lh6/lh7 when
+ * those codecs are reliable.
+ */
+#define LHADD_Method     (TAG_USER + 1)  /* ti_Data = compression level (0/5/6/7) */
+#define LHADD_Attrs      (TAG_USER + 2)  /* ti_Data = Amiga protection bits */
+#define LHADD_DateStamp  (TAG_USER + 3)  /* ti_Data = struct DateStamp * */
+#define LHADD_Comment    (TAG_USER + 4)  /* ti_Data = STRPTR filenote */
 
 #endif /* LIBRARIES_LHLIB_H */

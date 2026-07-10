@@ -21,6 +21,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <utility/hooks.h>
+#include <utility/tagitem.h>
 
 #ifndef ST_FILE
 #define ST_FILE (-3L)
@@ -52,7 +53,32 @@ static void lh_arc_clearerr(void)
     }
 }
 
-/* MODE_NEWFILE needs an absent path; rename aside if DeleteFile fails. */
+/* MODE_NEWFILE needs an absent path; rename aside if DeleteFile fails.
+ * Never operate on a volume/assign root (e.g. RAM: / SYS:) — DeleteFile or
+ * Open(MODE_NEWFILE) there can destroy the volume's contents.
+ */
+static int lh_path_is_volume_root(STRPTR path)
+{
+    LONG len;
+    STRPTR fp;
+
+    if (!path || !path[0]) {
+        return 1;
+    }
+    len = 0;
+    while (path[len] != '\0') {
+        len++;
+    }
+    if (path[len - 1] == ':') {
+        return 1;
+    }
+    fp = FilePart(path);
+    if (!fp || !fp[0]) {
+        return 1;
+    }
+    return 0;
+}
+
 static void lh_arc_remove_path(STRPTR path)
 {
     BPTR fh;
@@ -61,6 +87,9 @@ static void lh_arc_remove_path(STRPTR path)
     LONG plen;
 
     if (!path || !path[0]) {
+        return;
+    }
+    if (lh_path_is_volume_root(path)) {
         return;
     }
     for (retry = 0; retry < 4; retry++) {
@@ -105,6 +134,7 @@ static void lh_arc_remove_path(STRPTR path)
 
 struct lh_arc_entry_ref {
     char *name;
+    char *comment;
     unsigned long packed;
     unsigned long orig;
     lh_method method;
@@ -141,6 +171,7 @@ struct LhFileHandle {
     unsigned char *data;
     unsigned long size;
     unsigned long pos;
+    /* Always 0 today: handles are read-only memory images.  See lh_arc_write. */
     LONG writable;
 };
 
@@ -153,6 +184,7 @@ static void lh_arc_clear_catalog(struct LhArchive *arc)
     }
     for (i = 0; i < arc->catalog_count; i++) {
         free(arc->catalog[i].name);
+        free(arc->catalog[i].comment);
     }
     free(arc->catalog);
     arc->catalog = NULL;
@@ -178,6 +210,7 @@ static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry)
 {
     struct lh_arc_entry_ref *ref;
     char *name_copy;
+    char *comment_copy;
 
     if (!arc || !entry || !entry->filename) {
         return 0;
@@ -199,8 +232,18 @@ static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry)
         return 0;
     }
     strcpy(name_copy, entry->filename);
+    comment_copy = NULL;
+    if (entry->comment && entry->comment[0]) {
+        comment_copy = (char *)malloc(strlen(entry->comment) + 1);
+        if (!comment_copy) {
+            free(name_copy);
+            return 0;
+        }
+        strcpy(comment_copy, entry->comment);
+    }
     ref = &arc->catalog[arc->catalog_count];
     ref->name = name_copy;
+    ref->comment = comment_copy;
     ref->packed = (unsigned long)entry->packed_len;
     ref->orig = (unsigned long)entry->data_len;
     ref->method = entry->method;
@@ -244,25 +287,10 @@ static int lh_arc_build_catalog(struct LhArchive *arc)
 
 static void lh_dt_to_datestamp(const lh_datetime *dt, struct DateStamp *ds)
 {
-    unsigned long unix_secs;
-    unsigned long amiga_secs;
-
     if (!dt || !ds) {
         return;
     }
-    memset(ds, 0, sizeof(*ds));
-    /* Approximate conversion via lh pack/unpack not available here; use fields. */
-    unix_secs = (unsigned long)dt->second
-        + (unsigned long)dt->minute * 60UL
-        + (unsigned long)dt->hour * 3600UL
-        + (unsigned long)(dt->day - 1) * 86400UL
-        + (unsigned long)(dt->month - 1) * 30UL * 86400UL
-        + (unsigned long)(dt->year - 1970) * 365UL * 86400UL;
-    amiga_secs = unix_secs - ((8UL * 365UL + 2UL) * 86400UL);
-    ds->ds_Days = (LONG)(amiga_secs / 86400UL);
-    amiga_secs %= 86400UL;
-    ds->ds_Minute = (LONG)(amiga_secs / 60UL);
-    ds->ds_Tick = (LONG)((amiga_secs % 60UL) * 50UL);
+    lh_datetime_to_datestamp(dt, ds);
 }
 
 static void lh_ref_to_fib(const struct lh_arc_entry_ref *ref, struct FileInfoBlock *fib)
@@ -275,6 +303,7 @@ static void lh_ref_to_fib(const struct lh_arc_entry_ref *ref, struct FileInfoBlo
     fib->fib_FileName[sizeof(fib->fib_FileName) - 1] = '\0';
     fib->fib_Size = (LONG)ref->orig;
     fib->fib_NumBlocks = (LONG)((ref->orig + 511UL) / 512UL);
+    /* Amiga protection bits are stored directly as the LHA attribute byte. */
     fib->fib_Protection = (LONG)ref->attrs;
     if (ref->is_directory) {
         /* dos.doc: fib_DirEntryType positive for directories. */
@@ -284,6 +313,10 @@ static void lh_ref_to_fib(const struct lh_arc_entry_ref *ref, struct FileInfoBlo
     }
     lh_dt_to_datestamp(&ref->dt, &fib->fib_Date);
     fib->fib_Comment[0] = '\0';
+    if (ref->comment && ref->comment[0]) {
+        strncpy(fib->fib_Comment, ref->comment, sizeof(fib->fib_Comment) - 1);
+        fib->fib_Comment[sizeof(fib->fib_Comment) - 1] = '\0';
+    }
 }
 
 static int lh_name_match(const char *pattern, const char *name)
@@ -438,7 +471,7 @@ struct LhArchive *lh_arc_open(STRPTR path, LONG mode)
     arc->mode = mode;
     if (mode == LHARC_MODE_WRITE) {
         lh_arc_remove_path(path);
-        arc->writer = lh_writer_open(arc->path, 1, LH_LEVEL_LH5, &err);
+        arc->writer = lh_writer_open(arc->path, 2, LH_LEVEL_LH5, &err);
         if (!arc->writer) {
             free(arc);
             if (err == LH_ERR_NO_MEMORY) {
@@ -612,10 +645,11 @@ static ULONG lh_exall_hdrsize(LONG type)
     }
 }
 
-static ULONG lh_exall_reclen(LONG type, const char *name)
+static ULONG lh_exall_reclen(LONG type, const char *name, const char *comment)
 {
     ULONG hdr;
     ULONG nlen;
+    ULONG clen;
     ULONG total;
 
     hdr = lh_exall_hdrsize(type);
@@ -626,6 +660,16 @@ static ULONG lh_exall_reclen(LONG type, const char *name)
     total = hdr + nlen;
     if (total & 1UL) {
         total++;
+    }
+    if (type >= ED_COMMENT) {
+        clen = 1UL;
+        if (comment && comment[0]) {
+            clen = (ULONG)strlen(comment) + 1UL;
+        }
+        total += clen;
+        if (total & 1UL) {
+            total++;
+        }
     }
     return total;
 }
@@ -712,7 +756,7 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
 
     while (idx < arc->catalog_count) {
         ref = &arc->catalog[idx];
-        reclen = lh_exall_reclen(type, ref->name);
+        reclen = lh_exall_reclen(type, ref->name, ref->comment);
         if (reclen == 0UL || bp + reclen > bufend) {
             if (entries == 0 && idx < arc->catalog_count) {
                 lh_arc_seterr(ERROR_LINE_TOO_LONG);
@@ -743,7 +787,20 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
             ead->ed_Ticks = (ULONG)ds.ds_Tick;
         }
         if (type >= ED_COMMENT) {
-            ead->ed_Comment = NULL;
+            UBYTE *cp;
+            ULONG nlen;
+
+            nlen = (ULONG)strlen(ref->name) + 1UL;
+            cp = strp + nlen;
+            if (((ULONG)cp) & 1UL) {
+                cp++;
+            }
+            if (ref->comment && ref->comment[0]) {
+                strcpy((char *)cp, ref->comment);
+            } else {
+                cp[0] = '\0';
+            }
+            ead->ed_Comment = cp;
         }
         if (!lh_exall_accept(control, ead, type)) {
             idx++;
@@ -839,6 +896,11 @@ BPTR lh_arc_open_from_lock(BPTR lock_bptr, LONG mode)
     struct LhFileHandle *fh;
     int crc_ok;
 
+    /*
+     * Mode is ignored: every handle is a read-only decompressed image.
+     * MODE_NEWFILE / MODE_READWRITE would be needed for a real LhWrite path
+     * (see lh_arc_write).  Until then, open always loads the entry for read.
+     */
     (void)mode;
     if (!lock_bptr) {
         return (BPTR)NULL;
@@ -968,6 +1030,13 @@ LONG lh_arc_read_data(struct LhArchive *arc, STRPTR name, APTR *data_out)
         lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
         return -1L;
     }
+    if (!crc_ok) {
+        if (data) {
+            free(data);
+        }
+        lh_arc_seterr(ERROR_OBJECT_WRONG_TYPE);
+        return -1L;
+    }
     if (!data || sz == 0) {
         if (data) {
             free(data);
@@ -994,8 +1063,15 @@ LONG lh_arc_extract_entry(struct LhArchive *arc, STRPTR name, STRPTR dest)
     LONG len;
     BPTR fh;
     LONG wrote;
+    LONG idx;
+    struct DateStamp ds;
 
     if (!arc || !name || !dest) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
+        return DOSFALSE;
+    }
+    /* Refuse volume roots: Open(MODE_NEWFILE) on "RAM:" can wipe the disk. */
+    if (lh_path_is_volume_root(dest)) {
         lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
         return DOSFALSE;
     }
@@ -1021,6 +1097,16 @@ LONG lh_arc_extract_entry(struct LhArchive *arc, STRPTR name, STRPTR dest)
         DeleteFile(dest);
         lh_arc_seterr(IoErr());
         return DOSFALSE;
+    }
+    /* Apply Amiga metadata from the catalog (protection, date, filenote). */
+    idx = lh_find_entry_index(arc, (const char *)name);
+    if (idx >= 0) {
+        SetProtection(dest, (LONG)arc->catalog[idx].attrs);
+        lh_datetime_to_datestamp(&arc->catalog[idx].dt, &ds);
+        SetFileDate(dest, &ds);
+        if (arc->catalog[idx].comment && arc->catalog[idx].comment[0]) {
+            SetComment(dest, (STRPTR)arc->catalog[idx].comment);
+        }
     }
     lh_arc_clearerr();
     return DOSTRUE;
@@ -1110,6 +1196,30 @@ LONG lh_arc_read(BPTR fh_bptr, APTR buffer, LONG len)
     return (LONG)n;
 }
 
+/*
+ * LhWrite is intentionally a stub: always returns -1.
+ *
+ * Why: entry handles are not streaming writers.  LhOpen / LhOpenFromLock
+ * always decompress the whole entry into fh->data and set writable=0; mode
+ * is ignored.  Creating or replacing entries is done with LhAddEntry (and
+ * LhConcatArchive / LhDeleteFile for mutate) on an archive opened with
+ * LHARC_MODE_WRITE or LHARC_MODE_APPEND -- not via LhRead/LhWrite handles.
+ * The LVO exists for DOS-style API symmetry so read-only clients get a
+ * clean rejection rather than a missing vector.
+ *
+ * How a working version could work:
+ * 1. LhOpen/LhOpenFromLock honour Mode.  MODE_OLDFILE stays read-only as
+ *    today.  MODE_NEWFILE / MODE_READWRITE require the parent archive to be
+ *    open for write or append; set fh->writable and keep the entry name
+ *    (and optional existing payload for read/write).
+ * 2. LhWrite grows or overwrites fh->data (realloc), advances fh->pos and
+ *    fh->size, returns bytes written.  Reject if !writable.
+ * 3. LhClose on a writable handle commits by rewriting that entry in the
+ *    archive (same rewrite path as LhDeleteFile / LhAddEntry: temp file,
+ *    copy other entries, write this entry's buffer, rename).  Read-only
+ *    close stays a free of the memory image only.
+ * 4. Until that lands, callers must use LhAddEntry for new/replaced data.
+ */
 LONG lh_arc_write(BPTR fh_bptr, APTR buffer, LONG len)
 {
     (void)fh_bptr;
@@ -1126,6 +1236,7 @@ LONG lh_arc_closefh(BPTR fh_bptr)
         return DOSFALSE;
     }
     fh = (struct LhFileHandle *)fh_bptr;
+    /* Writable handles would commit fh->data into the archive here. */
     if (fh->lock && fh->owns_lock) {
         lh_arc_unlock((BPTR)fh->lock);
         fh->lock = NULL;
@@ -1171,8 +1282,37 @@ LONG lh_arc_seek(BPTR fh_bptr, LONG position, LONG mode)
 
 LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG len)
 {
+    return lh_arc_add_entry_taglist(archive, name, data, len, NULL);
+}
+
+/*
+ * LhAddEntryTagList -- add with optional TagItem overrides.
+ *
+ * Defaults: header level 2 (writer), LH0/store, LH_ATTR_DEFAULT,
+ * current DateStamp, no comment.  Store is the default until LH5
+ * compress/decompress round-trips reliably (real LHA rejects bad LH5).
+ * Request LH5 explicitly with LHADD_Method / LhAddEntryTags.
+ *
+ * Tags (libraries/lhlib.h):
+ *   LHADD_Method     - lh_level (0=store, 5=lh5, ...)
+ *   LHADD_Attrs      - Amiga protection bits → LHA attribute byte
+ *   LHADD_DateStamp  - struct DateStamp *
+ *   LHADD_Comment    - STRPTR filenote → extension 0x41
+ */
+LONG lh_arc_add_entry_taglist(
+    struct LhArchive *archive,
+    STRPTR name,
+    APTR data,
+    LONG len,
+    struct TagItem *tags)
+{
     lh_status st;
     lh_datetime dt;
+    lh_level level;
+    lh_attrs attrs;
+    const char *comment;
+    struct TagItem *t;
+    struct DateStamp *ds;
 
     if (!archive || !archive->writer || !name) {
         lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
@@ -1182,9 +1322,35 @@ LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG le
         lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
         return DOSFALSE;
     }
-    lh_datetime_from_time_t(&dt, 0);
-    st = lh_writer_add(archive->writer, (const char *)name, NULL,
-        LH_ATTR_DEFAULT, &dt, LH_LEVEL_STORE, 0,
+
+    /* Default store; LHADD_Method selects lh5/etc when the codec is ready. */
+    level = LH_LEVEL_STORE;
+    attrs = LH_ATTR_DEFAULT;
+    comment = NULL;
+    lh_datetime_now(&dt);
+
+    if (tags) {
+        for (t = tags; t->ti_Tag != TAG_DONE; t++) {
+            if (t->ti_Tag == TAG_IGNORE) {
+                continue;
+            }
+            if (t->ti_Tag == LHADD_Method) {
+                level = (lh_level)t->ti_Data;
+            } else if (t->ti_Tag == LHADD_Attrs) {
+                attrs = (lh_attrs)(t->ti_Data & 0xffUL);
+            } else if (t->ti_Tag == LHADD_DateStamp) {
+                ds = (struct DateStamp *)t->ti_Data;
+                if (ds) {
+                    lh_datetime_from_datestamp(ds, &dt);
+                }
+            } else if (t->ti_Tag == LHADD_Comment) {
+                comment = (const char *)t->ti_Data;
+            }
+        }
+    }
+
+    st = lh_writer_add(archive->writer, (const char *)name, comment,
+        attrs, &dt, level, 0,
         (const unsigned char *)data, (size_t)len);
     if (st != LH_OK) {
         if (st == LH_ERR_NO_MEMORY) {
@@ -1226,7 +1392,7 @@ LONG lh_arc_delete_entry(struct LhArchive *archive, STRPTR name)
         lh_reader_close(&archive->reader);
     }
     st = lh_archive_rewrite(archive->path, lh_keep_not_name, (void *)name,
-        1, LH_LEVEL_STORE, 0);
+        2, LH_LEVEL_STORE, 1);
     if (st != LH_OK) {
         if (had_reader) {
             archive->reader = lh_reader_open(archive->path, &st);
@@ -1265,8 +1431,12 @@ LONG lh_arc_concat(struct LhArchive *dest, STRPTR source_path)
     unsigned char *data;
     unsigned long len;
     int crc_ok;
+    struct TagItem tags[5];
+    ULONG n;
+    lh_level level;
 
     if (!dest || !dest->writer || !source_path) {
+        lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
         return DOSFALSE;
     }
     src = lh_arc_open(source_path, LHARC_MODE_READ);
@@ -1282,16 +1452,57 @@ LONG lh_arc_concat(struct LhArchive *dest, STRPTR source_path)
         len = 0;
         if (!lh_read_entry_data(src, src->catalog[i].name, &data, &len, &crc_ok)) {
             lh_arc_close(src);
+            lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
             return DOSFALSE;
         }
-        if (!lh_arc_add_entry(dest, (STRPTR)src->catalog[i].name, data, (LONG)len)) {
-            free(data);
-            lh_arc_close(src);
-            return DOSFALSE;
+        /*
+         * Re-add with source metadata.  Map method; LH0 stays stored so
+         * concat does not force a broken LH5 recompress of stored members.
+         */
+        if (src->catalog[i].method == LH_METHOD_LH0) {
+            level = LH_LEVEL_STORE;
+        } else if (src->catalog[i].method == LH_METHOD_LH1) {
+            level = LH_LEVEL_LH1;
+        } else if (src->catalog[i].method == LH_METHOD_LH6) {
+            level = LH_LEVEL_LH6;
+        } else if (src->catalog[i].method == LH_METHOD_LH7) {
+            level = LH_LEVEL_LH7;
+        } else {
+            /* Prefer store until LH5 round-trip is reliable. */
+            level = LH_LEVEL_STORE;
+        }
+        n = 0;
+        tags[n].ti_Tag = LHADD_Method;
+        tags[n].ti_Data = (ULONG)level;
+        n++;
+        tags[n].ti_Tag = LHADD_Attrs;
+        tags[n].ti_Data = (ULONG)src->catalog[i].attrs;
+        n++;
+        tags[n].ti_Tag = LHADD_DateStamp;
+        /* DateStamp tag wants struct DateStamp *; convert via stack. */
+        {
+            struct DateStamp ds;
+
+            lh_datetime_to_datestamp(&src->catalog[i].dt, &ds);
+            tags[n].ti_Data = (ULONG)&ds;
+            n++;
+            if (src->catalog[i].comment && src->catalog[i].comment[0]) {
+                tags[n].ti_Tag = LHADD_Comment;
+                tags[n].ti_Data = (ULONG)src->catalog[i].comment;
+                n++;
+            }
+            tags[n].ti_Tag = TAG_DONE;
+            if (!lh_arc_add_entry_taglist(dest, (STRPTR)src->catalog[i].name,
+                    data, (LONG)len, tags)) {
+                free(data);
+                lh_arc_close(src);
+                return DOSFALSE;
+            }
         }
         free(data);
     }
     lh_arc_close(src);
+    lh_arc_clearerr();
     return DOSTRUE;
 }
 

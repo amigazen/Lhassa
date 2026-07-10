@@ -382,16 +382,19 @@ static lh_method lh_level_to_method(lh_level level, int store_only)
 
 static void lh_meta_to_entry(const lh_hdr_meta *meta, lh_entry *entry)
 {
+    size_t flen;
+    size_t clen;
+
     memset(entry, 0, sizeof(*entry));
     if (meta->filename) {
-        size_t flen = strlen(meta->filename);
+        flen = strlen(meta->filename);
         entry->filename = (char *)malloc(flen + 1);
         if (entry->filename) {
             memcpy(entry->filename, meta->filename, flen + 1);
         }
     }
     if (meta->comment) {
-        size_t clen = strlen(meta->comment);
+        clen = strlen(meta->comment);
         entry->comment = (char *)malloc(clen + 1);
         if (entry->comment) {
             memcpy(entry->comment, meta->comment, clen + 1);
@@ -399,7 +402,7 @@ static void lh_meta_to_entry(const lh_hdr_meta *meta, lh_entry *entry)
     }
     entry->attrs = meta->attribute;
     if (meta->header_level >= 2) {
-        lh_datetime_from_time_t(&entry->datetime, (long)meta->timestamp);
+        lh_datetime_from_unix(&entry->datetime, meta->timestamp);
     } else {
         lh_datetime_unpack(meta->timestamp, &entry->datetime);
     }
@@ -477,14 +480,14 @@ lh_writer *lh_writer_open_append(const char *path, lh_status *err)
             }
             return NULL;
         }
-        w->header_level = 1;
+        w->header_level = 2;
         w->default_level = LH_LEVEL_LH5;
         if (err) {
             *err = LH_OK;
         }
         return w;
     }
-    return lh_writer_open(path, 1, LH_LEVEL_LH5, err);
+    return lh_writer_open(path, 2, LH_LEVEL_LH5, err);
 }
 
 lh_status lh_writer_add(
@@ -507,8 +510,7 @@ lh_status lh_writer_add(
     lh_status st;
     unsigned long ts;
     long rc;
-
-    (void)comment;
+    lh_datetime now;
 
     if (!w || !LH_STREAM_OPEN(&w->io) || !filename) {
         return LH_ERR_INVALID_ARG;
@@ -522,54 +524,70 @@ lh_status lh_writer_add(
     meta.os_id = LH_OS_AMIGA;
     meta.header_level = w->header_level;
     meta.filename = (char *)filename;
-    if (datetime) {
-        st = lh_datetime_pack(datetime, &ts);
-        if (st != LH_OK) {
-            return st;
-        }
-        meta.timestamp = ts;
-    } else {
-        lh_datetime now;
-
-        lh_datetime_now(&now);
-        meta.timestamp = lh_dos_timestamp_pack(&now);
+    if (comment && comment[0]) {
+        meta.comment = (char *)comment;
     }
-    if (data_len == 0 || method == LH_METHOD_LHD) {
+    if (datetime) {
+        if (w->header_level >= 2) {
+            meta.timestamp = lh_datetime_to_unix(datetime);
+        } else {
+            st = lh_datetime_pack(datetime, &ts);
+            if (st != LH_OK) {
+                return st;
+            }
+            meta.timestamp = ts;
+        }
+    } else {
+        lh_datetime_now(&now);
+        if (w->header_level >= 2) {
+            meta.timestamp = lh_datetime_to_unix(&now);
+        } else {
+            meta.timestamp = lh_dos_timestamp_pack(&now);
+        }
+    }
+    if (method == LH_METHOD_LHD) {
         meta.packed_size = 0;
         meta.is_directory = 1;
         strncpy(meta.method_sig, LH_SIG_LHD, LH_SIG_LEN);
         meta.method = LH_METHOD_LHD;
-    } else {
-        packed_cap = data_len + data_len / 8 + 512;
-        packed = (unsigned char *)malloc(packed_cap);
-        if (!packed) {
-            return LH_ERR_NO_MEMORY;
-        }
-        packed_len = packed_cap;
-        rc = lh_codec_compress((void *)data, (unsigned long)data_len,
-            packed, (unsigned long *)&packed_len, (long)method);
-        if (rc != 0) {
-            free(packed);
-            return LH_ERR_INVALID_ARG;
-        }
-        meta.packed_size = (unsigned long)packed_len;
-        meta.crc = lh_crc16(data, data_len);
+        meta.crc = 0;
+        st = lh_hdr_write(&w->io, &meta, w->header_level);
+        return st;
+    }
+    if (data_len == 0) {
+        /* Empty regular file: -lh0- (or chosen method) with zero payload. */
+        meta.packed_size = 0;
+        meta.crc = 0;
         meta.has_crc = 1;
         st = lh_hdr_write(&w->io, &meta, w->header_level);
-        if (st != LH_OK) {
-            free(packed);
-            return st;
-        }
-        if (packed_len > 0 && lh_stream_write(&w->io, packed, packed_len) != packed_len) {
-            free(packed);
-            return LH_ERR_IO;
-        }
-        free(packed);
-        return LH_OK;
+        return st;
     }
-    meta.crc = 0;
+    packed_cap = data_len + data_len / 8 + 512;
+    packed = (unsigned char *)malloc(packed_cap);
+    if (!packed) {
+        return LH_ERR_NO_MEMORY;
+    }
+    packed_len = packed_cap;
+    rc = lh_codec_compress((void *)data, (unsigned long)data_len,
+        packed, (unsigned long *)&packed_len, (long)method);
+    if (rc != 0) {
+        free(packed);
+        return LH_ERR_INVALID_ARG;
+    }
+    meta.packed_size = (unsigned long)packed_len;
+    meta.crc = lh_crc16(data, data_len);
+    meta.has_crc = 1;
     st = lh_hdr_write(&w->io, &meta, w->header_level);
-    return st;
+    if (st != LH_OK) {
+        free(packed);
+        return st;
+    }
+    if (packed_len > 0 && lh_stream_write(&w->io, packed, packed_len) != packed_len) {
+        free(packed);
+        return LH_ERR_IO;
+    }
+    free(packed);
+    return LH_OK;
 }
 
 lh_status lh_writer_close(lh_writer **w)

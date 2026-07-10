@@ -12,10 +12,19 @@
 #include <exec/types.h>
 #include <dos/dos.h>
 #include <dos/exall.h>
+#include <utility/tagitem.h>
 
 #define LHARC_MODE_READ   MODE_OLDFILE
 #define LHARC_MODE_WRITE  MODE_NEWFILE
 #define LHARC_MODE_APPEND 1007L
+
+/* LhAddEntryTagList / LhAddEntryTags tags (must match libraries/lhlib.h). */
+#ifndef LHADD_Method
+#define LHADD_Method     (TAG_USER + 1)
+#define LHADD_Attrs      (TAG_USER + 2)
+#define LHADD_DateStamp  (TAG_USER + 3)
+#define LHADD_Comment    (TAG_USER + 4)
+#endif
 
 struct LhArchive;
 struct LhLock;
@@ -48,6 +57,8 @@ LONG lh_arc_seek(BPTR fh, LONG position, LONG mode);
 LONG lh_arc_name_from_lock(BPTR lock, STRPTR buffer, LONG len);
 
 LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG len);
+LONG lh_arc_add_entry_taglist(struct LhArchive *archive, STRPTR name, APTR data,
+    LONG len, struct TagItem *tags);
 LONG lh_arc_delete_entry(struct LhArchive *archive, STRPTR name);
 LONG lh_arc_concat(struct LhArchive *dest, STRPTR source_path);
 LONG lh_arc_set_password(struct LhArchive *archive, STRPTR password);

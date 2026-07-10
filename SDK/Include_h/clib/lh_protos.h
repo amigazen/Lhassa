@@ -27,9 +27,11 @@ extern "C" {
 #ifndef LIBRARIES_LHLIB_H
 #include <libraries/lhlib.h>
 #endif
+#ifndef UTILITY_TAGITEM_H
+#include <utility/tagitem.h>
+#endif
 
 /* "lh.library"*/
-/*--- functions in V2 or higher ---*/
 
 /* Classic LhLib API (Holger Krekel 1990) + extended codec*/
 
@@ -37,6 +39,7 @@ struct LhBuffer *CreateBuffer(LONG OnlyDecode);
 void DeleteBuffer(struct LhBuffer *OldBuffer);
 ULONG LhEncode(struct LhBuffer *Buffer);
 ULONG LhDecode(struct LhBuffer *Buffer);
+/*--- functions in V2 or higher ---*/
 ULONG LhCompress(LONG Method, struct LhBuffer *Buffer);
 ULONG LhDecompress(LONG Method, struct LhBuffer *Buffer);
 
@@ -59,6 +62,8 @@ LONG LhClose(BPTR Fh);
 LONG LhSeek(BPTR Fh, LONG Position, LONG Mode);
 LONG LhNameFromLock(BPTR Lock, STRPTR Buffer, LONG Len);
 LONG LhAddEntry(struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen);
+LONG LhAddEntryTagList(struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen, struct TagItem *TagList);
+LONG LhAddEntryTags(struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen, ...);
 LONG LhDeleteFile(struct LhArchive *Archive, STRPTR Name);
 LONG LhConcatArchive(struct LhArchive *Dest, STRPTR SourcePath);
 LONG LhSetPassword(struct LhArchive *Archive, STRPTR Password);

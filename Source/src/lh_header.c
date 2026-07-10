@@ -262,6 +262,27 @@ static lh_status lh_hdr_read_extensions_buf(
                 memcpy(dirbuf, mem + pos, payload);
                 dirbuf[payload] = '\0';
                 dir_len = payload;
+                /* LHA type-2 uses 0xFF as path separator. */
+                {
+                    size_t di;
+
+                    for (di = 0; di < dir_len; di++) {
+                        if (dirbuf[di] == LH_PATH_SEP) {
+                            dirbuf[di] = '/';
+                        }
+                    }
+                }
+            }
+        } else if (blk_type == LH_EXT_COMMENT) {
+            free(meta->comment);
+            meta->comment = NULL;
+            if (payload > 0) {
+                meta->comment = (char *)malloc(payload + 1u);
+                if (!meta->comment) {
+                    return LH_ERR_NO_MEMORY;
+                }
+                memcpy(meta->comment, mem + pos, payload);
+                meta->comment[payload] = '\0';
             }
         }
         pos += payload;
@@ -384,6 +405,30 @@ static lh_status lh_hdr_read_extensions(
                 }
                 dirbuf[payload] = '\0';
                 dir_len = payload;
+                {
+                    size_t di;
+
+                    for (di = 0; di < dir_len; di++) {
+                        if (dirbuf[di] == LH_PATH_SEP) {
+                            dirbuf[di] = '/';
+                        }
+                    }
+                }
+            }
+        } else if (blk_type == LH_EXT_COMMENT) {
+            free(meta->comment);
+            meta->comment = NULL;
+            if (payload > 0) {
+                meta->comment = (char *)malloc(payload + 1u);
+                if (!meta->comment) {
+                    return LH_ERR_NO_MEMORY;
+                }
+                if (!lh_mf_read(io, mem, mem_len, &mem_pos, meta->comment, payload)) {
+                    free(meta->comment);
+                    meta->comment = NULL;
+                    return LH_ERR_TRUNCATED;
+                }
+                meta->comment[payload] = '\0';
             }
         } else if (payload > 0) {
             unsigned char scratch[256];
@@ -613,11 +658,28 @@ static lh_status lh_hdr_read_lhex(lh_stream *io, lh_hdr_meta *meta, unsigned cha
                     if (blk_len > 3 && (size_t)blk_len - 3u < sizeof(dirbuf)) {
                         for (i = 0; i < blk_len - 3; i++) {
                             dirbuf[i] = (char)lh_get_byte();
+                            if (dirbuf[i] == LH_PATH_SEP) {
+                                dirbuf[i] = '/';
+                            }
                         }
                         dirbuf[blk_len - 3] = '\0';
                         dir_len = (size_t)(blk_len - 3);
                     } else {
                         lh_setup_get(lh_get_ptr + (size_t)blk_len - 3u);
+                    }
+                    break;
+                case LH_EXT_COMMENT:
+                    free(meta->comment);
+                    meta->comment = NULL;
+                    if (blk_len > 3) {
+                        meta->comment = (char *)malloc((size_t)blk_len - 2u);
+                        if (!meta->comment) {
+                            return LH_ERR_NO_MEMORY;
+                        }
+                        for (i = 0; i < blk_len - 3; i++) {
+                            meta->comment[i] = (char)lh_get_byte();
+                        }
+                        meta->comment[blk_len - 3] = '\0';
                     }
                     break;
                 case 0x50:
@@ -735,7 +797,11 @@ lh_status lh_hdr_read(lh_stream *io, lh_hdr_meta *meta, unsigned char write_leve
         return LH_ERR_TRUNCATED;
     }
 
-    if (buf[LH_I_METHOD] != '-' || buf[LH_I_METHOD + 1] != 'l' || buf[LH_I_METHOD + 2] != 'h') {
+    /*
+     * Method IDs are five ASCII bytes: "-xxx-".  Amiga LhA uses -lhN- / -lhd-;
+     * LArc uses -lzN-; PMarc uses -pmN-.  Do not require "-lh" only.
+     */
+    if (buf[LH_I_METHOD] != '-' || buf[LH_I_METHOD + 4] != '-') {
         return LH_ERR_BAD_HEADER;
     }
 
@@ -750,18 +816,210 @@ lh_status lh_hdr_read(lh_stream *io, lh_hdr_meta *meta, unsigned char write_leve
     return st;
 }
 
+/*
+ * Append one extension block: LE16 length (3+payload), type, payload.
+ * Returns bytes written into dest, or 0 on overflow.
+ */
+static size_t lh_hdr_put_ext(
+    unsigned char *dest,
+    size_t dest_cap,
+    size_t pos,
+    unsigned char type,
+    const unsigned char *payload,
+    size_t payload_len)
+{
+    size_t need;
+
+    need = 3u + payload_len;
+    if (pos + need > dest_cap) {
+        return 0;
+    }
+    lh_write_le16(dest + pos, (lh_u16)need);
+    dest[pos + 2] = type;
+    if (payload_len > 0 && payload) {
+        memcpy(dest + pos + 3, payload, payload_len);
+    }
+    return need;
+}
+
+/*
+ * Split "LIBS/foo.library" into basename and LHA type-2 directory path
+ * (components separated by 0xFF, trailing 0xFF).
+ */
+static void lh_hdr_split_path(
+    const char *full,
+    char *basename,
+    size_t basename_cap,
+    unsigned char *dirpath,
+    size_t dirpath_cap,
+    size_t *dirpath_len)
+{
+    const char *slash;
+    const char *p;
+    size_t dlen;
+    size_t i;
+
+    *dirpath_len = 0;
+    basename[0] = '\0';
+    if (!full || !full[0]) {
+        return;
+    }
+    slash = strrchr(full, '/');
+    if (!slash) {
+        slash = strrchr(full, ':');
+        if (slash) {
+            /* Device-only prefix: keep whole name as basename. */
+            slash = NULL;
+        }
+    }
+    if (!slash) {
+        strncpy(basename, full, basename_cap - 1);
+        basename[basename_cap - 1] = '\0';
+        return;
+    }
+    dlen = (size_t)(slash - full);
+    if (dlen + 1u > dirpath_cap) {
+        dlen = dirpath_cap - 1u;
+    }
+    for (i = 0; i < dlen; i++) {
+        if (full[i] == '/') {
+            dirpath[i] = (unsigned char)LH_PATH_SEP;
+        } else {
+            dirpath[i] = (unsigned char)full[i];
+        }
+    }
+    /* Trailing path separator is conventional for type-2 directories. */
+    if (dlen > 0 && dirpath[dlen - 1] != (unsigned char)LH_PATH_SEP
+        && dlen + 1u < dirpath_cap) {
+        dirpath[dlen++] = (unsigned char)LH_PATH_SEP;
+    }
+    *dirpath_len = dlen;
+    p = slash + 1;
+    strncpy(basename, p, basename_cap - 1);
+    basename[basename_cap - 1] = '\0';
+}
+
 lh_status lh_hdr_write(lh_stream *io, const lh_hdr_meta *meta, unsigned char write_level)
 {
-    unsigned char buf[260];
+    unsigned char buf[LH_HDR_BUF];
+    char basename[256];
+    unsigned char dirpath[512];
+    size_t dirpath_len;
     size_t name_len;
+    size_t comment_len;
     size_t hdr_body;
+    size_t pos;
+    size_t n;
     unsigned char checksum;
     size_t i;
+    const char *write_name;
 
     if (!io || !LH_STREAM_OPEN(io) || !meta || !meta->filename) {
         return LH_ERR_INVALID_ARG;
     }
-    name_len = strlen(meta->filename);
+
+    /*
+     * Level 2: 16-bit header size, Unix timestamp, file CRC at 21, OS at 23,
+     * then extensions.  Spec requires a type-0 common header carrying the
+     * header CRC-16; without it classic/Unix LHA reports header CRC errors.
+     * Offset 19 is reserved (0x20) on Unix; Amiga OS ID keeps protection bits
+     * there so SetProtection round-trips.
+     */
+    if (write_level >= 2) {
+        size_t hcrc_pos;
+        unsigned short hcrc;
+        unsigned char os_id;
+
+        lh_hdr_split_path(meta->filename, basename, sizeof(basename),
+            dirpath, sizeof(dirpath), &dirpath_len);
+        if (!basename[0]) {
+            return LH_ERR_INVALID_ARG;
+        }
+        name_len = strlen(basename);
+        comment_len = (meta->comment && meta->comment[0])
+            ? strlen(meta->comment) : 0;
+        os_id = meta->os_id ? meta->os_id : LH_OS_AMIGA;
+
+        memset(buf, 0, sizeof(buf));
+        memcpy(buf + LH_I_METHOD, meta->method_sig, LH_SIG_LEN);
+        lh_write_le32(buf + LH_I_PACKED, meta->packed_size);
+        lh_write_le32(buf + LH_I_ORIGINAL, meta->original_size);
+        lh_write_le32(buf + LH_I_STAMP, meta->timestamp);
+        if (os_id == LH_OS_AMIGA) {
+            buf[LH_I_ATTR] = meta->attribute;
+        } else {
+            buf[LH_I_ATTR] = 0x20;
+        }
+        buf[LH_I_LEVEL] = 2;
+        lh_write_le16(buf + 21, meta->crc);
+        buf[23] = os_id;
+        pos = 24;
+
+        /* Common header first: size 5, type 0, CRC placeholder. */
+        n = lh_hdr_put_ext(buf, sizeof(buf), pos, LH_EXT_COMMON, NULL, 2);
+        if (n == 0) {
+            return LH_ERR_BAD_HEADER;
+        }
+        hcrc_pos = pos + 3;
+        lh_write_le16(buf + hcrc_pos, 0);
+        pos += n;
+
+        n = lh_hdr_put_ext(buf, sizeof(buf), pos, LH_EXT_FILENAME,
+            (const unsigned char *)basename, name_len);
+        if (n == 0) {
+            return LH_ERR_FILENAME_TOO_LONG;
+        }
+        pos += n;
+
+        if (dirpath_len > 0) {
+            n = lh_hdr_put_ext(buf, sizeof(buf), pos, LH_EXT_PATH,
+                dirpath, dirpath_len);
+            if (n == 0) {
+                return LH_ERR_FILENAME_TOO_LONG;
+            }
+            pos += n;
+        }
+
+        if (comment_len > 0) {
+            n = lh_hdr_put_ext(buf, sizeof(buf), pos, LH_EXT_COMMENT,
+                (const unsigned char *)meta->comment, comment_len);
+            if (n == 0) {
+                return LH_ERR_BAD_HEADER;
+            }
+            pos += n;
+        }
+
+        /* Terminate extension chain. */
+        if (pos + 2u > sizeof(buf)) {
+            return LH_ERR_BAD_HEADER;
+        }
+        lh_write_le16(buf + pos, 0);
+        pos += 2;
+
+        /*
+         * Level-2 size low byte must not be 0 (looks like end-of-archive).
+         * Pad one byte when needed, as classic LHA does.
+         */
+        if ((pos & 0xffu) == 0) {
+            if (pos + 1u > sizeof(buf)) {
+                return LH_ERR_BAD_HEADER;
+            }
+            buf[pos++] = 0;
+        }
+
+        lh_write_le16(buf, (lh_u16)pos);
+        hcrc = lh_crc16(buf, pos);
+        lh_write_le16(buf + hcrc_pos, hcrc);
+
+        if (lh_stream_write(io, buf, pos) != pos) {
+            return LH_ERR_IO;
+        }
+        return LH_OK;
+    }
+
+    /* Level 0/1: classic lhex layout with inline name (no comment ext). */
+    write_name = meta->filename;
+    name_len = strlen(write_name);
     if (name_len > 200) {
         return LH_ERR_FILENAME_TOO_LONG;
     }
@@ -773,7 +1031,7 @@ lh_status lh_hdr_write(lh_stream *io, const lh_hdr_meta *meta, unsigned char wri
     buf[19] = meta->attribute;
     buf[20] = write_level;
     buf[21] = (unsigned char)name_len;
-    memcpy(buf + 22, meta->filename, name_len);
+    memcpy(buf + 22, write_name, name_len);
     lh_write_le16(buf + 22 + name_len, meta->crc);
     buf[22 + name_len + 2] = meta->os_id ? meta->os_id : LH_OS_AMIGA;
     if (write_level >= 1) {
@@ -800,12 +1058,6 @@ lh_status lh_hdr_write(lh_stream *io, const lh_hdr_meta *meta, unsigned char wri
     }
     if (lh_stream_write(io, buf + hdr_body, 2) != 2) {
         return LH_ERR_IO;
-    }
-    if (write_level >= 2) {
-        /* Terminate extension chain (level-2 readers expect this word). */
-        if (lh_stream_write(io, "\0\0", 2) != 2) {
-            return LH_ERR_IO;
-        }
     }
     return LH_OK;
 }

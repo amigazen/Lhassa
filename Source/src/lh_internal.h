@@ -53,13 +53,27 @@ typedef unsigned long lh_u32;
 #define LH_SIG_LH5 "-lh5-"
 #define LH_SIG_LH6 "-lh6-"
 #define LH_SIG_LH7 "-lh7-"
+#define LH_SIG_LHX "-lhx-"
 #define LH_SIG_LZS "-lzs-"
 #define LH_SIG_LZ5 "-lz5-"
 #define LH_SIG_LZ4 "-lz4-"
 #define LH_SIG_LHD "-lhd-"
+#define LH_SIG_PM0 "-pm0-"
+#define LH_SIG_PM1 "-pm1-"
+#define LH_SIG_PM2 "-pm2-"
+#define LH_SIG_PMS "-pms-"
+#define LH_SIG_PC1 "-pc1-"
 
 #define LH_OS_AMIGA 'A'
 #define LH_OS_MSDOS 'M'
+
+/* LHA header extension types (level 1/2). */
+#define LH_EXT_COMMON    0x00  /* header CRC-16 (required for level 2) */
+#define LH_EXT_FILENAME  1
+#define LH_EXT_PATH      2
+#define LH_EXT_COMMENT   0x41
+/* Path components in type-2 extensions are separated by 0xFF. */
+#define LH_PATH_SEP      ((char)0xFF)
 
 #define LH_BUF_DECODE_AUX 4500u
 #define LH_BUF_ENCODE_AUX 40000u
@@ -125,7 +139,10 @@ unsigned long lh_dos_timestamp_pack(const lh_datetime *dt);
 void lh_datetime_now(lh_datetime *dt);
 #ifdef LH_AMIGA
 void lh_datetime_from_datestamp(const struct DateStamp *ds, lh_datetime *dt);
+void lh_datetime_to_datestamp(const lh_datetime *dt, struct DateStamp *ds);
 #endif
+void lh_datetime_from_unix(lh_datetime *dt, unsigned long unix_secs);
+unsigned long lh_datetime_to_unix(const lh_datetime *dt);
 
 /* Codec internals */
 void lh_init_decompress_state(
@@ -172,6 +189,7 @@ long lh_decompress_lh6(void *, unsigned long, void *, unsigned long);
 long lh_compress_lh6(void *, unsigned long, void *, unsigned long *);
 long lh_decompress_lh7(void *, unsigned long, void *, unsigned long);
 long lh_compress_lh7(void *, unsigned long, void *, unsigned long *);
+long lh_decompress_lhx(void *, unsigned long, void *, unsigned long);
 long lh_decompress_lzs(void *, unsigned long, void *, unsigned long);
 long lh_compress_lzs(void *, unsigned long, void *, unsigned long *);
 long lh_decompress_lz5(void *, unsigned long, void *, unsigned long);

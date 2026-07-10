@@ -301,6 +301,7 @@ static int lha_cmd_extract(const lha_args *args, int with_paths)
         fprintf(stderr, "lha: cannot open %s\n", args->archive);
         return 1;
     }
+    lha_progress_set_filter(args);
     lh_reader_set_progress(r, lha_extract_progress_begin, lha_progress_update,
         lha_progress_end, NULL);
     lha_extract_banner(args->archive);
@@ -314,6 +315,7 @@ static int lha_cmd_extract(const lha_args *args, int with_paths)
         }
         if (st != LH_OK) {
             fprintf(stderr, "lha: %s\n", lh_status_string(st));
+            lha_progress_set_filter(NULL);
             lh_reader_close(&r);
             return 1;
         }
@@ -331,6 +333,7 @@ static int lha_cmd_extract(const lha_args *args, int with_paths)
             name = lha_basename(entry.filename);
         }
         if (!lha_path_join(outpath, sizeof(outpath), dest, name)) {
+            fprintf(stderr, "lha: path too long for %s\n", entry.filename);
             free(name != entry.filename ? name : NULL);
             lh_entry_clear(&entry);
             continue;
@@ -340,16 +343,20 @@ static int lha_cmd_extract(const lha_args *args, int with_paths)
         }
         if (g_opts.no_execute) {
             printf("EXTRACT %s\n", outpath);
+            count++;
         } else if (!lha_write_file(outpath, entry.data, entry.data_len)) {
             fprintf(stderr, "lha: cannot write %s\n", outpath);
+        } else {
+            lha_apply_file_metadata(outpath, &entry.datetime, entry.attrs);
+            count++;
         }
         if (!entry.crc_ok) {
             bad++;
         }
-        count++;
         lh_entry_clear(&entry);
     }
     lh_reader_close(&r);
+    lha_progress_set_filter(NULL);
     lha_extract_summary(count, bad);
     if (bad > 0) {
         lha_operation_failed();

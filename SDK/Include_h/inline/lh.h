@@ -9,7 +9,6 @@
 */
 
 /* "lh.library" */
-/*--- functions in V2 or higher --- */
 
 /* Classic LhLib API (Holger Krekel 1990) + extended codec */
 
@@ -47,6 +46,7 @@
 	r;   \
 })
 
+/*--- functions in V2 or higher --- */
 #define LhCompress(Method, Buffer)    \
 ({  \
 	register void *b __asm("a6") = LhBase;  \
@@ -246,13 +246,35 @@
 	r;   \
 })
 
+#define LhAddEntryTagList(Archive, Name, Data, DataLen, TagList)    \
+({  \
+	register void *b __asm("a6") = LhBase;  \
+	register struct LhArchive *p0 __asm("a0") = (Archive);   \
+	register STRPTR p1 __asm("a1") = (Name);   \
+	register APTR p2 __asm("a2") = (Data);   \
+	register LONG p3 __asm("d0") = (DataLen);   \
+	register struct TagItem *p4 __asm("a3") = (TagList);   \
+	register APTR r __asm("d0");   \
+	__asm volatile ("jsr a6@(-168:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1), "r"(p2), "r"(p3), "r"(p4) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	r;   \
+})
+
+#ifndef NO_INLINE_STDARG
+#define LhAddEntryTags(Archive, Name, Data, DataLen, tags...)    \
+({  \
+	ULONG _tags[] = {tags};   \
+	LhAddEntryTagList((Archive), (Name), (Data), (DataLen), _tags);   \
+	r;   \
+})
+#endif
+
 #define LhDeleteFile(Archive, Name)    \
 ({  \
 	register void *b __asm("a6") = LhBase;  \
 	register struct LhArchive *p0 __asm("a0") = (Archive);   \
 	register STRPTR p1 __asm("a1") = (Name);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-168:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-174:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -262,7 +284,7 @@
 	register struct LhArchive *p0 __asm("a0") = (Dest);   \
 	register STRPTR p1 __asm("a1") = (SourcePath);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-174:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-180:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -272,7 +294,7 @@
 	register struct LhArchive *p0 __asm("a0") = (Archive);   \
 	register STRPTR p1 __asm("a1") = (Password);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-180:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-186:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -283,7 +305,7 @@
 	register STRPTR p1 __asm("a1") = (Name);   \
 	register APTR *p2 __asm("a2") = (DataOut);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-186:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1), "r"(p2) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-192:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1), "r"(p2) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -294,7 +316,7 @@
 	register STRPTR p1 __asm("a1") = (Name);   \
 	register STRPTR p2 __asm("a2") = (DestPath);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-192:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1), "r"(p2) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-198:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1), "r"(p2) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -304,7 +326,7 @@
 	register struct LhArchive *p0 __asm("a0") = (Archive);   \
 	register STRPTR p1 __asm("a1") = (Name);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-198:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-204:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -314,7 +336,7 @@
 	register struct LhArchive *p0 __asm("a0") = (Archive);   \
 	register STRPTR p1 __asm("a1") = (Name);   \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-204:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-210:W);" : "+r"(b), "=r"(r) : "r"(p0), "r"(p1) : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 
@@ -322,7 +344,7 @@
 ({  \
 	register void *b __asm("a6") = LhBase;  \
 	register APTR r __asm("d0");   \
-	__asm volatile ("jsr a6@(-210:W);" : "+r"(b), "=r"(r) :  : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
+	__asm volatile ("jsr a6@(-216:W);" : "+r"(b), "=r"(r) :  : "d0", "d1", "a0", "a1", "fp0", "fp1", "cc", "memory");    \
 	r;   \
 })
 

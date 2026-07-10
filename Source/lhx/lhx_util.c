@@ -430,12 +430,16 @@ LONG lhx_read_file(STRPTR path, APTR *data, LONG *len)
     if (fh == (BPTR)NULL) {
         return DOSFALSE;
     }
-    size = Seek(fh, 0L, OFFSET_END);
-    if (size < 0) {
+    /*
+     * AmigaDOS Seek returns the previous position, not the new one.
+     * Seek to end, then Seek to start — the second call's return is the size.
+     */
+    if (Seek(fh, 0L, OFFSET_END) < 0) {
         Close(fh);
         return DOSFALSE;
     }
-    if (Seek(fh, 0L, OFFSET_BEGINNING) < 0) {
+    size = Seek(fh, 0L, OFFSET_BEGINNING);
+    if (size < 0) {
         Close(fh);
         return DOSFALSE;
     }

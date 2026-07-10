@@ -237,14 +237,17 @@ long lh_codec_decompress(void * inBuf, unsigned long inSize, void * outBuf, unsi
             return lh_decompress_lh7(inBuf, inSize, outBuf, outSize);
         case LH_METHOD_PC1:
         case LH_METHOD_PM0:
-            /* PMarc no compression methods */
+            /* PMarc store — same as LH0. */
             return lh_decompress_lh0(inBuf, inSize, outBuf, outSize);
         case LH_METHOD_PM1:
         case LH_METHOD_PM2:
-            /* PMarc compression methods - use LH5 as base for now */
-            return lh_decompress_lh5(inBuf, inSize, outBuf, outSize);
+            /*
+             * PMarc CP/M compressors — not Amiga LHA.  Do not feed these
+             * bitstreams into LH5; that crashed on pmarc124/mtcd.pma.
+             */
+            return LH_ERR_UNSUPPORTED;
         case LH_METHOD_PMS:
-            /* PMarc self-extracting - skip to reveal real format */
+            /* PMarc self-extracting stub — not supported. */
             return LH_ERR_UNSUPPORTED;
         case LH_METHOD_LZ2:
         case LH_METHOD_LZ3:
@@ -253,8 +256,7 @@ long lh_codec_decompress(void * inBuf, unsigned long inSize, void * outBuf, unsi
             /* LArc extensions - use LZS as base for now */
             return lh_decompress_lzs(inBuf, inSize, outBuf, outSize);
         case LH_METHOD_LHX:
-            /* UNLHA32 extension - use LH7 as base for now */
-            return lh_decompress_lh7(inBuf, inSize, outBuf, outSize);
+            return lh_decompress_lhx(inBuf, inSize, outBuf, outSize);
         default:
             return LH_ERR_INVALID_ARG;
     }
@@ -327,16 +329,13 @@ long lh_codec_compress(void * inBuf, unsigned long inSize, void * outBuf, unsign
             break;
         case LH_METHOD_PC1:
         case LH_METHOD_PM0:
-            /* PMarc no compression methods */
+            /* PMarc store — same as LH0. */
             result = lh_compress_lh0(input, inSize, output, &size);
             break;
         case LH_METHOD_PM1:
         case LH_METHOD_PM2:
-            /* PMarc compression methods - use LH5 as base for now */
-            result = lh_compress_lh5(input, inSize, output, &size);
-            break;
         case LH_METHOD_PMS:
-            /* PMarc self-extracting - not supported for compression */
+            /* PMarc compress / SFX — intentionally unsupported. */
             result = LH_ERR_UNSUPPORTED;
             break;
         case LH_METHOD_LZ2:
@@ -404,82 +403,7 @@ long lh_decompress_lh0(void *inBuf, unsigned long inSize, void *outBuf, unsigned
     return LH_OK;
 }
 
-/* LH1 decompression - LZSS with static Huffman coding */
-long lh_decompress_lh1(void * inBuf, unsigned long inSize, void * outBuf, unsigned long outSize) {
-    struct lh_decompress_state state;
-    unsigned long i, j, c, matchPos, matchLen;
-    unsigned char codeLengths[256];
-    unsigned char offsetLengths[256];
-    
-    /* Check parameters */
-    if (!inBuf || !outBuf || inSize == 0 || outSize == 0) {
-        return LH_ERR_INVALID_ARG;
-    }
-    
-    /* Initialize state */
-    lh_init_decompress_state(&state, inBuf, inSize, outBuf, outSize);
-    
-    /* Read code tree lengths */
-    for (i = 0; i < 256; i++) {
-        codeLengths[i] = lh_read_bits(&state, 5);
-    }
-    
-    /* Build code Huffman tree */
-    lh_build_huffman_tree(state.codeTree, codeLengths, 256);
-    
-    /* Read offset tree lengths */
-    for (i = 0; i < 256; i++) {
-        offsetLengths[i] = lh_read_bits(&state, 5);
-    }
-    
-    /* Build offset Huffman tree */
-    lh_build_huffman_tree(state.lengthTree, offsetLengths, 256);
-    
-    /* Main decompression loop */
-    while (state.outPos < outSize) {
-        /* Decode next token */
-        c = lh_decode_value(&state, state.codeTree, 256);
-        
-        if (c < 256) {
-            /* Literal byte */
-            if (state.outPos >= outSize) {
-                return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-            }
-            
-            /* Store byte in output and ring buffer */
-            state.outBuffer[state.outPos++] = c;
-            state.ringBuffer[state.ringPos++] = c;
-            
-            /* Wrap around ring buffer position if needed */
-            if (state.ringPos >= LH_RING_BUFFER_SIZE) {
-                state.ringPos = 0;
-            }
-        } else {
-            /* Match - decode position and length */
-            matchPos = lh_decode_value(&state, state.lengthTree, 256);
-            matchLen = c - 256 + MATCH_LENGTH_THRESHOLD;
-            
-            /* Copy bytes from ring buffer to output */
-            for (j = 0; j < matchLen; j++) {
-                unsigned char b = state.ringBuffer[(matchPos + j) % LH_RING_BUFFER_SIZE];
-                
-                if (state.outPos >= outSize) {
-                    return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-                }
-                
-                state.outBuffer[state.outPos++] = b;
-                state.ringBuffer[state.ringPos++] = b;
-                
-                /* Wrap around ring buffer position if needed */
-                if (state.ringPos >= LH_RING_BUFFER_SIZE) {
-                    state.ringPos = 0;
-                }
-            }
-        }
-    }
-    
-    return LH_OK;
-}
+/* lh_decompress_lh1 is implemented in lh_lh1dec.c. */
 
 /* LH1 compression - LZSS with static Huffman coding */
 long lh_compress_lh1(void * inBuf, unsigned long inSize, void * outBuf, unsigned long *outSize) {
@@ -1047,122 +971,7 @@ cleanup:
     return result;
 }
 
-/* LH6 decompression - Enhanced LH5 with larger dictionary */
-long lh_decompress_lh6(void * inBuf, unsigned long inSize, void * outBuf, unsigned long outSize) {
-    struct lh_decompress_state state;
-    unsigned long i, j, c, pos, len;
-    const unsigned long NUM_LITERAL_CODES = LH6_LITERAL_CODES;
-    const unsigned long NUM_LEN_CODES = LH6_LENGTH_CODES;
-    const unsigned long NUM_CODES = LH6_TOTAL_CODES;
-    const unsigned long DISTANCE_TABLE_SIZE = 128;  /* Double the size compared to LH5 */
-    unsigned char codeLengths[272]; /* Fixed size for LH6_TOTAL_CODES (256+16) */
-    unsigned char distanceCodeLengths[128]; /* Fixed size for DISTANCE_TABLE_SIZE */
-    unsigned long distanceBase[128]; /* Fixed size for DISTANCE_TABLE_SIZE */
-    unsigned long distanceExtraBits[128]; /* Fixed size for DISTANCE_TABLE_SIZE */
-    unsigned long distanceCode;
-    unsigned long extraBits;
-    unsigned long distance;
-    
-    /* Initialize distance tables */
-    for (i = 0; i < DISTANCE_TABLE_SIZE; i++) {
-        if (i < 8) {
-            distanceBase[i] = i;
-            distanceExtraBits[i] = 0;
-        } else if (i < 16) {
-            distanceBase[i] = 8 + (i - 8) * 2;
-            distanceExtraBits[i] = 1;
-        } else if (i < 32) {
-            distanceBase[i] = 24 + (i - 16) * 4;
-            distanceExtraBits[i] = 2;
-        } else if (i < 64) {
-            distanceBase[i] = 88 + (i - 32) * 8;
-            distanceExtraBits[i] = 3;
-        } else {
-            distanceBase[i] = 344 + (i - 64) * 16;
-            distanceExtraBits[i] = 4;
-        }
-    }
-    
-    /* Check parameters */
-    if (!inBuf || !outBuf || inSize == 0 || outSize == 0) {
-        return LH_ERR_INVALID_ARG;
-    }
-    
-    /* Initialize state */
-    lh_init_decompress_state(&state, inBuf, inSize, outBuf, outSize);
-    
-    /* Read in code lengths for literal/length code tree */
-    for (i = 0; i < NUM_CODES; i++) {
-        codeLengths[i] = lh_read_bits(&state, 4);
-    }
-    
-    /* Build literal/length Huffman tree */
-    lh_build_huffman_tree(state.codeTree, codeLengths, NUM_CODES);
-    
-    /* Read in code lengths for distance code tree */
-    for (i = 0; i < DISTANCE_TABLE_SIZE; i++) {
-        distanceCodeLengths[i] = lh_read_bits(&state, 4); /* 4 bits instead of 3 in LH5 */
-    }
-    
-    /* Build distance Huffman tree */
-    lh_build_huffman_tree(state.lengthTree, distanceCodeLengths, DISTANCE_TABLE_SIZE);
-    
-    /* Main decompression loop */
-    while (state.outPos < outSize) {
-        /* Decode next token */
-        c = lh_decode_value(&state, state.codeTree, NUM_CODES);
-        
-        if (c < NUM_LITERAL_CODES) {
-            /* Literal byte */
-            if (state.outPos >= outSize) {
-                return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-            }
-            
-            /* Store byte in output and ring buffer */
-            state.outBuffer[state.outPos++] = c;
-            state.ringBuffer[state.ringPos++] = c;
-            
-            /* Wrap around ring buffer position if needed */
-            if (state.ringPos >= LH6_DICT_SIZE) {
-                state.ringPos = 0;
-            }
-        } else {
-            /* Match - decode length */
-            len = c - NUM_LITERAL_CODES + MATCH_LENGTH_THRESHOLD;
-            
-            /* Decode match distance */
-            distanceCode = lh_decode_value(&state, state.lengthTree, DISTANCE_TABLE_SIZE);
-            extraBits = distanceExtraBits[distanceCode];
-            distance = distanceBase[distanceCode];
-            
-            if (extraBits > 0) {
-                distance += lh_read_bits(&state, extraBits);
-            }
-            
-            /* Calculate position in ring buffer */
-            pos = (state.ringPos - distance) & (LH6_DICT_SIZE - 1);
-            
-            /* Copy bytes from ring buffer to output */
-            for (j = 0; j < len; j++) {
-                unsigned char b = state.ringBuffer[(pos + j) & (LH6_DICT_SIZE - 1)];
-                
-                if (state.outPos >= outSize) {
-                    return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-                }
-                
-                state.outBuffer[state.outPos++] = b;
-                state.ringBuffer[state.ringPos++] = b;
-                
-                /* Wrap around ring buffer position if needed */
-                if (state.ringPos >= LH6_DICT_SIZE) {
-                    state.ringPos = 0;
-                }
-            }
-        }
-    }
-    
-    return LH_OK;
-}
+/* lh_decompress_lh6 is implemented in lh_lh5dec.c (real LH4..LH7 decoder). */
 
 long lh_compress_lh6(void * inBuf, unsigned long inSize, void * outBuf, unsigned long *outSize) {
     unsigned char *input = (unsigned char *)inBuf;
@@ -1593,144 +1402,7 @@ cleanup:
 }
 
 /* LH7 decompression - advanced LZSS with adaptive Huffman coding */
-long lh_decompress_lh7(void * inBuf, unsigned long inSize, void * outBuf, unsigned long outSize) {
-    struct lh_decompress_state state;
-    unsigned long i, j, c, pos, len;
-    unsigned char codeLengths[288]; /* Fixed size for LH7_TOTAL_CODES (256+32) */
-    unsigned char distCodeLengths[13]; /* Fixed size for LH7_OFFSET_BITS */
-    unsigned long lengthBase[32]; /* Fixed size for LH7_LENGTH_CODES */
-    unsigned long lengthExtraBits[32]; /* Fixed size for LH7_LENGTH_CODES */
-    unsigned long usePresetDict;
-    unsigned long distanceCode;
-    unsigned long extraBits;
-    unsigned long offsetBits;
-    unsigned long distLengthBits;
-    unsigned long codeLengthBits;
-    unsigned long lengthCode;
-    
-    /* Initialize length tables */
-    for (i = 0; i < LH7_LENGTH_CODES; i++) {
-        if (i < 8) {
-            lengthBase[i] = i + MATCH_LENGTH_THRESHOLD;
-            lengthExtraBits[i] = 0;
-        } else if (i < 16) {
-            lengthBase[i] = 8 + MATCH_LENGTH_THRESHOLD + (i - 8) * 2;
-            lengthExtraBits[i] = 1;
-        } else if (i < 24) {
-            lengthBase[i] = 24 + MATCH_LENGTH_THRESHOLD + (i - 16) * 4;
-            lengthExtraBits[i] = 2;
-        } else {
-            lengthBase[i] = 56 + MATCH_LENGTH_THRESHOLD + (i - 24) * 8;
-            lengthExtraBits[i] = 3;
-        }
-    }
-    
-    /* Check parameters */
-    if (!inBuf || !outBuf || inSize == 0 || outSize == 0) {
-        return LH_ERR_INVALID_ARG;
-    }
-    
-    /* Initialize state */
-    lh_init_decompress_state(&state, inBuf, inSize, outBuf, outSize);
-    
-    /* Read flag for pre-compressed Huffman trees */
-    usePresetDict = lh_read_bits(&state, 1);
-    
-    if (usePresetDict) {
-        /* Use built-in precomputed codes */
-        for (i = 0; i < LH7_TOTAL_CODES; i++) {
-            if (i < LH7_LITERAL_CODES) {
-                /* Literals have fixed length of 9 bits */
-                codeLengths[i] = 9;
-            } else {
-                /* Length codes have fixed length of 6 bits */
-                codeLengths[i] = 6;
-            }
-        }
-        
-        for (i = 0; i < LH7_OFFSET_BITS; i++) {
-            /* Offset bits have fixed length of 5 bits */
-            distCodeLengths[i] = 5;
-        }
-    } else {
-        /* Read in code lengths for main tree */
-        codeLengthBits = lh_read_bits(&state, 3) + 5; /* 5-12 bits */
-        
-        for (i = 0; i < LH7_TOTAL_CODES; i++) {
-            codeLengths[i] = lh_read_bits(&state, codeLengthBits);
-        }
-        
-        /* Read in code lengths for distance tree */
-        distLengthBits = lh_read_bits(&state, 2) + 4; /* 4-7 bits */
-        
-        for (i = 0; i < LH7_OFFSET_BITS; i++) {
-            distCodeLengths[i] = lh_read_bits(&state, distLengthBits);
-        }
-    }
-    
-    /* Build Huffman trees */
-    lh_build_huffman_tree(state.codeTree, codeLengths, LH7_TOTAL_CODES);
-    lh_build_huffman_tree(state.lengthTree, distCodeLengths, LH7_OFFSET_BITS);
-    
-    /* Main decompression loop */
-    while (state.outPos < outSize) {
-        /* Decode next token */
-        c = lh_decode_value(&state, state.codeTree, LH7_TOTAL_CODES);
-        
-        if (c < LH7_LITERAL_CODES) {
-            /* Literal byte */
-            if (state.outPos >= outSize) {
-                return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-            }
-            
-            /* Store byte in output and ring buffer */
-            state.outBuffer[state.outPos++] = c;
-            state.ringBuffer[state.ringPos++] = c;
-            
-            /* Wrap around ring buffer position if needed */
-            if (state.ringPos >= LH7_DICT_SIZE) {
-                state.ringPos = 0;
-            }
-        } else {
-            /* Match - decode length */
-            lengthCode = c - LH7_LITERAL_CODES;
-            len = lengthBase[lengthCode];
-            
-            if (lengthExtraBits[lengthCode] > 0) {
-                len += lh_read_bits(&state, lengthExtraBits[lengthCode]);
-            }
-            
-            /* Decode match offset - uses separate coding for bits */
-            offsetBits = 0;
-            
-            for (i = 0; i < LH7_OFFSET_BITS; i++) {
-                offsetBits = (offsetBits << 1) | lh_decode_value(&state, state.lengthTree, LH7_OFFSET_BITS);
-            }
-            
-            /* Calculate position in ring buffer */
-            pos = (state.ringPos - offsetBits) & (LH7_DICT_SIZE - 1);
-            
-            /* Copy bytes from ring buffer to output */
-            for (j = 0; j < len; j++) {
-                unsigned char b = state.ringBuffer[(pos + j) & (LH7_DICT_SIZE - 1)];
-                
-                if (state.outPos >= outSize) {
-                    return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-                }
-                
-                state.outBuffer[state.outPos++] = b;
-                state.ringBuffer[state.ringPos++] = b;
-                
-                /* Wrap around ring buffer position if needed */
-                if (state.ringPos >= LH7_DICT_SIZE) {
-                    state.ringPos = 0;
-                }
-            }
-        }
-    }
-    
-    return LH_OK;
-}
+/* lh_decompress_lh7 is implemented in lh_lh5dec.c (real LH4..LH7 decoder). */
 
 long lh_compress_lh7(void * inBuf, unsigned long inSize, void * outBuf, unsigned long *outSize) {
     /* Declare all variables at the start */
@@ -2477,84 +2149,10 @@ static unsigned long FindBestMatch(unsigned char *window, unsigned long windowPo
 }
 
 /* LH2 decompression - 8 KiB sliding window, max 256 bytes match length, Dynamic Huffman */
+/* -lh2- is rare/experimental; stub avoids crashing on a 4K ring overrun. */
 long lh_decompress_lh2(void * inBuf, unsigned long inSize, void * outBuf, unsigned long outSize) {
-    struct lh_decompress_state state;
-    unsigned long i, j, c, matchPos, matchLen;
-    unsigned char codeLengths[256];
-    unsigned char offsetLengths[256];
-    
-    /* Check parameters */
-    if (!inBuf || !outBuf || inSize == 0 || outSize == 0) {
-        return LH_ERR_INVALID_ARG;
-    }
-    
-    /* Initialize state with 8K dictionary */
-    lh_init_decompress_state(&state, inBuf, inSize, outBuf, outSize);
-    
-    /* LH2 uses 8K dictionary instead of 4K */
-    memset(state.ringBuffer, ' ', 8192 + LH_MAX_MATCH_LENGTH - 1);
-    state.ringPos = 8192 - LH_MAX_MATCH_LENGTH;
-    
-    /* Read code tree lengths */
-    for (i = 0; i < 256; i++) {
-        codeLengths[i] = lh_read_bits(&state, 5);
-    }
-    
-    /* Build code Huffman tree */
-    lh_build_huffman_tree(state.codeTree, codeLengths, 256);
-    
-    /* Read offset tree lengths */
-    for (i = 0; i < 256; i++) {
-        offsetLengths[i] = lh_read_bits(&state, 5);
-    }
-    
-    /* Build offset Huffman tree */
-    lh_build_huffman_tree(state.lengthTree, offsetLengths, 256);
-    
-    /* Main decompression loop */
-    while (state.outPos < outSize) {
-        /* Decode next token */
-        c = lh_decode_value(&state, state.codeTree, 256);
-        
-        if (c < 256) {
-            /* Literal byte */
-            if (state.outPos >= outSize) {
-                return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-            }
-            
-            /* Store byte in output and ring buffer */
-            state.outBuffer[state.outPos++] = c;
-            state.ringBuffer[state.ringPos++] = c;
-            
-            /* Wrap around ring buffer position if needed */
-            if (state.ringPos >= 8192) {
-                state.ringPos = 0;
-            }
-        } else {
-            /* Match - decode position and length */
-            matchPos = lh_decode_value(&state, state.lengthTree, 256);
-            matchLen = c - 256 + MATCH_LENGTH_THRESHOLD;
-            
-            /* Copy bytes from ring buffer to output */
-            for (j = 0; j < matchLen; j++) {
-                unsigned char b = state.ringBuffer[(matchPos + j) % 8192];
-                
-                if (state.outPos >= outSize) {
-                    return LH_ERR_INVALID_ARG; /* Output buffer overflow */
-                }
-                
-                state.outBuffer[state.outPos++] = b;
-                state.ringBuffer[state.ringPos++] = b;
-                
-                /* Wrap around ring buffer position if needed */
-                if (state.ringPos >= 8192) {
-                    state.ringPos = 0;
-                }
-            }
-        }
-    }
-    
-    return LH_OK;
+    (void)inBuf; (void)inSize; (void)outBuf; (void)outSize;
+    return LH_ERR_UNSUPPORTED;
 }
 
 /* LH2 compression - 8 KiB sliding window, max 256 bytes match length, Dynamic Huffman */
@@ -2661,9 +2259,8 @@ cleanup:
 
 /* LH3 decompression - LH2 variant with Static Huffman */
 long lh_decompress_lh3(void * inBuf, unsigned long inSize, void * outBuf, unsigned long outSize) {
-    /* LH3 is similar to LH2 but uses static Huffman coding */
-    /* For now, use LH2 implementation as base */
-    return lh_decompress_lh2(inBuf, inSize, outBuf, outSize);
+    (void)inBuf; (void)inSize; (void)outBuf; (void)outSize;
+    return LH_ERR_UNSUPPORTED;
 }
 
 /* LH3 compression - LH2 variant with Static Huffman */
@@ -2674,11 +2271,7 @@ long lh_compress_lh3(void * inBuf, unsigned long inSize, void * outBuf, unsigned
 }
 
 /* LH4 decompression - 4 KiB sliding window, max 256 bytes match length, Static Huffman */
-long lh_decompress_lh4(void * inBuf, unsigned long inSize, void * outBuf, unsigned long outSize) {
-    /* LH4 is similar to LH1 but uses static Huffman coding */
-    /* For now, use LH1 implementation as base */
-    return lh_decompress_lh1(inBuf, inSize, outBuf, outSize);
-}
+/* lh_decompress_lh4 is implemented in lh_lh5dec.c (real LH4..LH7 decoder). */
 
 /* LH4 compression - 4 KiB sliding window, max 256 bytes match length, Static Huffman */
 long lh_compress_lh4(void * inBuf, unsigned long inSize, void * outBuf, unsigned long *outSize) {

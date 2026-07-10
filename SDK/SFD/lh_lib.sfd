@@ -1,4 +1,4 @@
-==id $VER: lh_lib.sfd 2.1 (03.07.2026)
+==id $VER: lh_lib.sfd 2.2 (10.07.2026)
 * "lh.library"
 ==base LhBase
 ==basetype struct Library *
@@ -10,7 +10,8 @@
 ==include <dos/dos.h>
 ==include <dos/exall.h>
 ==include <libraries/lhlib.h>
-==version 2
+==include <utility/tagitem.h>
+==typedef LhArchive
 *
 * Classic LhLib API (Holger Krekel 1990) + extended codec
 *
@@ -18,6 +19,7 @@ struct LhBuffer *CreateBuffer (LONG OnlyDecode)(D0)
 void DeleteBuffer (struct LhBuffer *OldBuffer)(A0)
 ULONG LhEncode (struct LhBuffer *Buffer)(A0)
 ULONG LhDecode (struct LhBuffer *Buffer)(A0)
+==version 2
 ULONG LhCompress (LONG Method, struct LhBuffer *Buffer)(D0,A0)
 ULONG LhDecompress (LONG Method, struct LhBuffer *Buffer)(D0,A0)
 *
@@ -40,6 +42,9 @@ LONG LhClose (BPTR Fh)(D1)
 LONG LhSeek (BPTR Fh, LONG Position, LONG Mode)(D1,D2,D0)
 LONG LhNameFromLock (BPTR Lock, STRPTR Buffer, LONG Len)(A0,A1,D0)
 LONG LhAddEntry (struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen)(A0,A1,A2,D0)
+LONG LhAddEntryTagList (struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen, struct TagItem *TagList)(A0,A1,A2,D0,A3)
+==varargs
+LONG LhAddEntryTags (struct LhArchive *Archive, STRPTR Name, APTR Data, LONG DataLen, ...)(A0,A1,A2,D0,A3)
 LONG LhDeleteFile (struct LhArchive *Archive, STRPTR Name)(A0,A1)
 LONG LhConcatArchive (struct LhArchive *Dest, STRPTR SourcePath)(A0,A1)
 LONG LhSetPassword (struct LhArchive *Archive, STRPTR Password)(A0,A1)

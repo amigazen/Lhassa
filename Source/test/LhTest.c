@@ -5,15 +5,24 @@
  *
  * LhTest.c - Standalone lh.library smoke / regression harness.
  *
- * Exercises every public LVO from SDK/SFD/lh_lib.sfd (31 functions):
+ * Exercises every public LVO from SDK/SFD/lh_lib.sfd (32 functions):
  *
  *   CreateBuffer, DeleteBuffer, LhEncode, LhDecode, LhCompress, LhDecompress,
  *   LhOpenArchive, LhCloseArchive, LhLock, LhUnLock, LhExamine, LhExNext,
  *   LhExAll, LhExAllEnd, LhInfo, LhOpenFromLock, LhOpen, LhRead, LhWrite,
- *   LhClose, LhSeek, LhNameFromLock, LhAddEntry, LhDeleteFile, LhConcatArchive,
- *   LhSetPassword, LhReadData, LhExtractEntry, LhTestEntry, LhPrintEntry, LhErr.
+ *   LhClose, LhSeek, LhNameFromLock, LhAddEntry, LhAddEntryTagList,
+ *   LhDeleteFile, LhConcatArchive, LhSetPassword, LhReadData, LhExtractEntry,
+ *   LhTestEntry, LhPrintEntry, LhErr.
+ *   (LhAddEntryTags is the ==varargs alias of LhAddEntryTagList, same LVO.)
  *
- * Flow: classic buffer -> create fixture -> read APIs -> mutate -> verify.
+ * Fixture entries are added with LH0 via LhAddEntryTagList (same as the
+ * current LhAddEntry default) so payload round-trips stay deterministic.
+ * Add coverage includes multi-KB in-memory LhAddEntry and an LhX-style
+ * on-disk file with SetProtection/SetComment, TagList add, extract, and
+ * Examine of the restored protection bits and filenote.
+ *
+ * Flow: classic buffer -> add round-trips -> create fixture -> read APIs
+ * -> mutate -> verify.
  *
  *   LhTest >RAM:LhTest.out
  *   LhTest LhA-mos.lha
@@ -26,6 +35,7 @@
 #include <exec/memory.h>
 #include <dos/dos.h>
 #include <dos/exall.h>
+#include <utility/tagitem.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -38,6 +48,18 @@
 #define LT_FIXTURE      "RAM:LhTest/LhTest.lha"
 #define LT_FIXTURE2     "RAM:LhTest/LhTstCat.lha"
 #define LT_EXTRACT_DIR  "RAM:LhTest/Out"
+#define LT_ADD_ARC      "RAM:LhTest/LhAdd.lha"
+#define LT_ADD_SRC      "RAM:LhTest/LtAddSrc.bin"
+#define LT_ADD_ENTRY    "LtAddSrc.bin"
+#define LT_ADD_OUT      "RAM:LhTest/Out/LtAddSrc.bin"
+#define LT_ADD_SIZE     4096L
+#define LT_ADD_COMMENT  "LhTest Amiga filenote"
+/*
+ * Distinctive Amiga protection for round-trip checks.  LHA stores one
+ * attribute byte; script/pure/archive are high-active, rwed are low-active.
+ * FIBF_EXECUTE set = execute protected (no 'e').
+ */
+#define LT_ADD_PROT     ((LONG)(FIBF_SCRIPT | FIBF_PURE | FIBF_ARCHIVE | FIBF_EXECUTE))
 #define LT_METHOD_LH0   0L
 #define LT_ENTRY_A      "LtReadme.txt"
 #define LT_ENTRY_B      "lhtest.bin"
@@ -94,7 +116,8 @@ lt_end(BOOL ok, STRPTR actual)
 static VOID
 lt_print_api_plan(VOID)
 {
-    Printf("LhTest: plan - all 31 public LVOs from SDK/SFD/lh_lib.sfd\n");
+    Printf("LhTest: plan - all 32 public LVOs from SDK/SFD/lh_lib.sfd\n");
+    Printf("LhTest:   (+ LhAddEntryTags varargs alias of LhAddEntryTagList)\n");
     Flush(Output());
 }
 
@@ -102,6 +125,64 @@ static VOID
 lt_lherr_detail(char *buf, LONG bufsz)
 {
     sprintf(buf, "LhErr %ld", (long)LhErr());
+}
+
+/*
+ * Add with LH0 + attrs 0 via LhAddEntryTagList (explicit method tag).
+ */
+static BOOL
+lt_add_store(struct LhArchive *arc, STRPTR name, APTR data, LONG len)
+{
+    struct TagItem tags[3];
+
+    tags[0].ti_Tag = LHADD_Method;
+    tags[0].ti_Data = (ULONG)LT_METHOD_LH0;
+    tags[1].ti_Tag = LHADD_Attrs;
+    tags[1].ti_Data = 0UL;
+    tags[2].ti_Tag = TAG_DONE;
+    return LhAddEntryTagList(arc, name, data, len, tags) ? TRUE : FALSE;
+}
+
+/*
+ * Examine a disk file; fill prot/comment.  Returns FALSE if lock/examine fails.
+ */
+static BOOL
+lt_disk_examine(STRPTR path, LONG *prot_out, STRPTR comment_out, LONG comment_max)
+{
+    BPTR lock;
+    struct FileInfoBlock *fib;
+
+    if (prot_out) {
+        *prot_out = 0;
+    }
+    if (comment_out && comment_max > 0) {
+        comment_out[0] = '\0';
+    }
+    lock = Lock(path, ACCESS_READ);
+    if (lock == (BPTR)NULL) {
+        return FALSE;
+    }
+    fib = (struct FileInfoBlock *)AllocMem(
+        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+    if (fib == NULL) {
+        UnLock(lock);
+        return FALSE;
+    }
+    if (!Examine(lock, fib)) {
+        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+        UnLock(lock);
+        return FALSE;
+    }
+    if (prot_out) {
+        *prot_out = fib->fib_Protection;
+    }
+    if (comment_out && comment_max > 0) {
+        strncpy((char *)comment_out, fib->fib_Comment, (size_t)comment_max - 1);
+        comment_out[comment_max - 1] = '\0';
+    }
+    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+    UnLock(lock);
+    return TRUE;
 }
 
 static BOOL
@@ -371,8 +452,8 @@ lt_write_archive(STRPTR path, STRPTR name_a, STRPTR data_a, ULONG len_a,
     lt_end(TRUE, path);
 
     sprintf(expect, "DOSTRUE for %s", (const char *)name_a);
-    lt_begin((STRPTR)"LhAddEntry", (STRPTR)expect);
-    if (!LhAddEntry(arc, name_a, (APTR)data_a, (LONG)len_a)) {
+    lt_begin((STRPTR)"LhAddEntryTagList", (STRPTR)expect);
+    if (!lt_add_store(arc, name_a, (APTR)data_a, (LONG)len_a)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
         lt_end(FALSE, (STRPTR)detail);
@@ -381,8 +462,8 @@ lt_write_archive(STRPTR path, STRPTR name_a, STRPTR data_a, ULONG len_a,
     lt_end(TRUE, name_a);
 
     sprintf(expect, "DOSTRUE for %s", (const char *)name_b);
-    lt_begin((STRPTR)"LhAddEntry", (STRPTR)expect);
-    if (!LhAddEntry(arc, name_b, (APTR)data_b, (LONG)len_b)) {
+    lt_begin((STRPTR)"LhAddEntryTagList", (STRPTR)expect);
+    if (!lt_add_store(arc, name_b, (APTR)data_b, (LONG)len_b)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
         lt_end(FALSE, (STRPTR)detail);
@@ -435,6 +516,317 @@ lt_count_entries(STRPTR path, LONG *count_out)
     LhCloseArchive(arc);
     *count_out = count;
     return TRUE;
+}
+
+static VOID
+lt_test_addentry_default(VOID)
+{
+    struct LhArchive *arc;
+    struct FileInfoBlock *fib;
+    struct TagItem tags[5];
+    BPTR flock;
+    BPTR fh;
+    APTR disk_data;
+    APTR round_data;
+    LONG disk_len;
+    LONG round_len;
+    LONG wrote;
+    LONG i;
+    LONG n;
+    LONG src_prot;
+    LONG out_prot;
+    ULONG mem_len;
+    char *mem_payload;
+    char src_comment[80];
+    char out_comment[80];
+    char detail[48];
+    char expect[48];
+
+    /*
+     * In-memory LhAddEntry with a multi-KB payload (not a 1-byte smoke).
+     * Catches store/header issues that a single-byte add would miss.
+     */
+    mem_len = 2048UL;
+    sprintf(expect, "round-trip %lu bytes", (unsigned long)mem_len);
+    lt_begin((STRPTR)"LhAddEntry", (STRPTR)expect);
+    if (!lt_ensure_dir((STRPTR)LT_RAMDIR)) {
+        lt_end(FALSE, (STRPTR)"mkdir failed");
+        return;
+    }
+    mem_payload = (char *)AllocMem(mem_len, MEMF_PUBLIC | MEMF_CLEAR);
+    if (mem_payload == NULL) {
+        lt_end(FALSE, (STRPTR)"AllocMem failed");
+        return;
+    }
+    for (i = 0; i < (LONG)mem_len; i++) {
+        mem_payload[i] = (char)(i & 0xff);
+    }
+    lt_remove_path((STRPTR)LT_ADD_ARC);
+    arc = LhOpenArchive((STRPTR)LT_ADD_ARC, LHARC_MODE_WRITE);
+    if (arc == NULL) {
+        lt_lherr_detail(detail, (LONG)sizeof(detail));
+        FreeMem(mem_payload, mem_len);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    if (!LhAddEntry(arc, (STRPTR)"plain.bin", (APTR)mem_payload, (LONG)mem_len)) {
+        lt_lherr_detail(detail, (LONG)sizeof(detail));
+        LhCloseArchive(arc);
+        FreeMem(mem_payload, mem_len);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    if (!LhCloseArchive(arc)) {
+        FreeMem(mem_payload, mem_len);
+        lt_end(FALSE, (STRPTR)"close failed");
+        return;
+    }
+    arc = LhOpenArchive((STRPTR)LT_ADD_ARC, LHARC_MODE_READ);
+    if (arc == NULL) {
+        FreeMem(mem_payload, mem_len);
+        lt_end(FALSE, (STRPTR)"reopen failed");
+        return;
+    }
+    round_data = NULL;
+    round_len = LhReadData(arc, (STRPTR)"plain.bin", &round_data);
+    if (round_len != (LONG)mem_len || round_data == NULL
+            || memcmp(round_data, mem_payload, (size_t)mem_len) != 0) {
+        sprintf(detail, "len=%ld mismatch", (long)round_len);
+        if (round_data != NULL) {
+            FreeMem(round_data, (ULONG)round_len > 0 ? (ULONG)round_len : 1UL);
+        }
+        LhCloseArchive(arc);
+        FreeMem(mem_payload, mem_len);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    FreeMem(round_data, (ULONG)round_len);
+    LhCloseArchive(arc);
+    FreeMem(mem_payload, mem_len);
+    lt_end(TRUE, (STRPTR)expect);
+
+    /*
+     * LhX-style path: real disk file with SetProtection/SetComment, FIB
+     * TagList add, content round-trip, then extract and Examine metadata.
+     */
+    sprintf(expect, "disk %ld bytes + FIB tags", (long)LT_ADD_SIZE);
+    lt_begin((STRPTR)"LhAddEntryTagList(disk)", (STRPTR)expect);
+    lt_remove_path((STRPTR)LT_ADD_SRC);
+    lt_remove_path((STRPTR)LT_ADD_ARC);
+    disk_data = AllocMem((ULONG)LT_ADD_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
+    if (disk_data == NULL) {
+        lt_end(FALSE, (STRPTR)"AllocMem failed");
+        return;
+    }
+    for (i = 0; i < LT_ADD_SIZE; i++) {
+        ((unsigned char *)disk_data)[i] = (unsigned char)((i * 17 + 3) & 0xff);
+    }
+    fh = Open((STRPTR)LT_ADD_SRC, MODE_NEWFILE);
+    if (fh == (BPTR)NULL) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"cannot create src");
+        return;
+    }
+    wrote = Write(fh, disk_data, LT_ADD_SIZE);
+    Close(fh);
+    if (wrote != LT_ADD_SIZE) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"Write src failed");
+        return;
+    }
+
+    /* Amiga metadata on the input file before archiving (LhX reads via FIB). */
+    if (!SetComment((STRPTR)LT_ADD_SRC, (STRPTR)LT_ADD_COMMENT)) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"SetComment src failed");
+        return;
+    }
+    if (!SetProtection((STRPTR)LT_ADD_SRC, LT_ADD_PROT)) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"SetProtection src failed");
+        return;
+    }
+    if (!lt_disk_examine((STRPTR)LT_ADD_SRC, &src_prot, (STRPTR)src_comment,
+            (LONG)sizeof(src_comment))) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"Examine src failed");
+        return;
+    }
+    if ((src_prot & 0xffL) != (LT_ADD_PROT & 0xffL)
+            || strcmp(src_comment, LT_ADD_COMMENT) != 0) {
+        sprintf(detail, "src prot=%ld note bad", (long)src_prot);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+
+    /* Size via Seek the Amiga way (same as Assemble / fixed LhX). */
+    fh = Open((STRPTR)LT_ADD_SRC, MODE_OLDFILE);
+    if (fh == (BPTR)NULL) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"cannot reopen src");
+        return;
+    }
+    if (Seek(fh, 0L, OFFSET_END) < 0) {
+        Close(fh);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"Seek END failed");
+        return;
+    }
+    disk_len = Seek(fh, 0L, OFFSET_BEGINNING);
+    Close(fh);
+    if (disk_len != LT_ADD_SIZE) {
+        sprintf(detail, "Seek size=%ld", (long)disk_len);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+
+    fib = (struct FileInfoBlock *)AllocMem(
+        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+    if (fib == NULL) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"FIB AllocMem failed");
+        return;
+    }
+    arc = LhOpenArchive((STRPTR)LT_ADD_ARC, LHARC_MODE_WRITE);
+    if (arc == NULL) {
+        lt_lherr_detail(detail, (LONG)sizeof(detail));
+        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    n = 0;
+    flock = Lock((STRPTR)LT_ADD_SRC, ACCESS_READ);
+    if (flock != (BPTR)NULL && Examine(flock, fib)) {
+        tags[n].ti_Tag = LHADD_Attrs;
+        tags[n].ti_Data = (ULONG)fib->fib_Protection;
+        n++;
+        tags[n].ti_Tag = LHADD_DateStamp;
+        tags[n].ti_Data = (ULONG)&fib->fib_Date;
+        n++;
+        if (fib->fib_Comment[0] != '\0') {
+            tags[n].ti_Tag = LHADD_Comment;
+            tags[n].ti_Data = (ULONG)fib->fib_Comment;
+            n++;
+        }
+    }
+    if (flock != (BPTR)NULL) {
+        UnLock(flock);
+    }
+    tags[n].ti_Tag = TAG_DONE;
+    if (!LhAddEntryTagList(arc, (STRPTR)LT_ADD_ENTRY, disk_data, disk_len, tags)) {
+        lt_lherr_detail(detail, (LONG)sizeof(detail));
+        LhCloseArchive(arc);
+        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+    if (!LhCloseArchive(arc)) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"close failed");
+        return;
+    }
+
+    arc = LhOpenArchive((STRPTR)LT_ADD_ARC, LHARC_MODE_READ);
+    if (arc == NULL) {
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"reopen failed");
+        return;
+    }
+    round_data = NULL;
+    round_len = LhReadData(arc, (STRPTR)LT_ADD_ENTRY, &round_data);
+    if (round_len != LT_ADD_SIZE || round_data == NULL
+            || memcmp(round_data, disk_data, (size_t)LT_ADD_SIZE) != 0) {
+        sprintf(detail, "len=%ld content bad", (long)round_len);
+        if (round_data != NULL && round_len > 0) {
+            FreeMem(round_data, (ULONG)round_len);
+        }
+        LhCloseArchive(arc);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    FreeMem(round_data, (ULONG)round_len);
+
+    /* Catalog must expose the same protection and filenote. */
+    flock = LhLock(arc, (STRPTR)LT_ADD_ENTRY);
+    if (flock == (BPTR)NULL) {
+        LhCloseArchive(arc);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"LhLock entry failed");
+        return;
+    }
+    fib = (struct FileInfoBlock *)AllocMem(
+        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+    if (fib == NULL) {
+        LhUnLock(flock);
+        LhCloseArchive(arc);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)"FIB2 AllocMem failed");
+        return;
+    }
+    if (!LhExamine(flock, fib)
+            || (fib->fib_Protection & 0xffL) != (LT_ADD_PROT & 0xffL)
+            || strcmp(fib->fib_Comment, LT_ADD_COMMENT) != 0) {
+        sprintf(detail, "arc prot=%ld note bad", (long)fib->fib_Protection);
+        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+        LhUnLock(flock);
+        LhCloseArchive(arc);
+        FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+    LhUnLock(flock);
+    LhCloseArchive(arc);
+    FreeMem(disk_data, (ULONG)LT_ADD_SIZE);
+    lt_end(TRUE, (STRPTR)expect);
+
+    /*
+     * Extract to disk and Examine the restored file — proves SetProtection
+     * / SetComment on the unarchived object match the archived Amiga attrs.
+     */
+    lt_begin((STRPTR)"LhExtractEntry(meta)",
+        (STRPTR)"prot+comment on extracted file");
+    if (!lt_ensure_dir((STRPTR)LT_EXTRACT_DIR)) {
+        lt_end(FALSE, (STRPTR)"mkdir Out failed");
+        return;
+    }
+    SetProtection((STRPTR)LT_ADD_OUT, 0);
+    DeleteFile((STRPTR)LT_ADD_OUT);
+    arc = LhOpenArchive((STRPTR)LT_ADD_ARC, LHARC_MODE_READ);
+    if (arc == NULL) {
+        lt_end(FALSE, (STRPTR)"open for extract failed");
+        return;
+    }
+    if (!LhExtractEntry(arc, (STRPTR)LT_ADD_ENTRY, (STRPTR)LT_ADD_OUT)) {
+        lt_lherr_detail(detail, (LONG)sizeof(detail));
+        LhCloseArchive(arc);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    LhCloseArchive(arc);
+    if (!lt_disk_examine((STRPTR)LT_ADD_OUT, &out_prot, (STRPTR)out_comment,
+            (LONG)sizeof(out_comment))) {
+        lt_end(FALSE, (STRPTR)"Examine extract failed");
+        return;
+    }
+    if ((out_prot & 0xffL) != (LT_ADD_PROT & 0xffL)) {
+        sprintf(detail, "prot got=%ld want=%ld", (long)out_prot,
+            (long)LT_ADD_PROT);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    if (strcmp(out_comment, LT_ADD_COMMENT) != 0) {
+        sprintf(detail, "comment='%s'", out_comment);
+        lt_end(FALSE, (STRPTR)detail);
+        return;
+    }
+    lt_end(TRUE, (STRPTR)"prot+comment match");
 }
 
 static VOID
@@ -1063,6 +1455,8 @@ lt_test_extract(STRPTR arc_path, STRPTR entry, ULONG expect_len)
         return;
     }
     sprintf(outpath, "%s/%s", LT_EXTRACT_DIR, (const char *)entry);
+    /* Prior runs may have left write/delete-protected extracts (bad attrs). */
+    SetProtection((STRPTR)outpath, 0);
     DeleteFile((STRPTR)outpath);
 
     arc = LhOpenArchive(arc_path, LHARC_MODE_READ);
@@ -1101,7 +1495,7 @@ lt_build_single_entry(STRPTR path, STRPTR name, STRPTR data, ULONG len)
     if (arc == NULL) {
         return FALSE;
     }
-    if (!LhAddEntry(arc, name, (APTR)data, (LONG)len)) {
+    if (!lt_add_store(arc, name, (APTR)data, (LONG)len)) {
         LhCloseArchive(arc);
         return FALSE;
     }
@@ -1139,8 +1533,8 @@ lt_test_mutate(STRPTR path)
     }
     lt_end(TRUE, path);
 
-    lt_begin((STRPTR)"LhAddEntry(append)", (STRPTR)"DOSTRUE for LtExtra.txt");
-    if (!LhAddEntry(arc, (STRPTR)LT_ENTRY_C, (APTR)lt_plain_c, (LONG)len_c)) {
+    lt_begin((STRPTR)"LhAddEntryTagList(append)", (STRPTR)"DOSTRUE for LtExtra.txt");
+    if (!lt_add_store(arc, (STRPTR)LT_ENTRY_C, (APTR)lt_plain_c, (LONG)len_c)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
         lt_end(FALSE, (STRPTR)detail);
@@ -1384,9 +1778,9 @@ lt_print_archive_skip(VOID)
     Printf("LhTest: SKIP 25 archive LVOs (fixture create failed):\n");
     Printf("  LhOpenArchive LhCloseArchive LhLock LhUnLock LhExamine LhExNext\n");
     Printf("  LhExAll LhExAllEnd LhInfo LhOpenFromLock LhOpen LhRead LhWrite\n");
-    Printf("  LhClose LhSeek LhNameFromLock LhAddEntry LhDeleteFile\n");
-    Printf("  LhConcatArchive LhSetPassword LhReadData LhExtractEntry\n");
-    Printf("  LhTestEntry LhPrintEntry\n");
+    Printf("  LhClose LhSeek LhNameFromLock LhAddEntry LhAddEntryTagList\n");
+    Printf("  LhDeleteFile LhConcatArchive LhSetPassword LhReadData\n");
+    Printf("  LhExtractEntry LhTestEntry LhPrintEntry LhErr\n");
     Flush(Output());
 }
 
@@ -1410,6 +1804,7 @@ main(int argc, char **argv)
 
     lt_test_classic_buffer();
     lt_test_codec_lh0();
+    lt_test_addentry_default();
     lt_test_fixture_create();
 
     if (lt_got_fixture) {

@@ -1,0 +1,43 @@
+#
+# Source/lh-handler/smakefile
+#
+# root-handler packet loop + host FS passthrough (lh_pkt) + LHA overlay.
+#
+
+CC      = sc
+LD      = slink
+RM      = delete force quiet
+
+TARGET  = lh-handler
+OBJS    = lh-handler.o lh_path.o lh_arc.o lh_pkt.o lhh_debug.o
+
+all: $(TARGET)
+
+rebuild: clean all
+
+$(TARGET): $(OBJS)
+	$(LD) FROM $(OBJS) TO $(TARGET) ND NOICONS SMALLDATA SMALLCODE LIB lib:amiga.lib sc:lib/sc.lib BATCH
+
+lh-handler.o: lh-handler.c lh-handler.h lh-handler_rev.h lhh_debug.h
+	$(CC) DEF=AMIGA lh-handler.c OBJNAME=lh-handler.o
+
+lh_path.o: lh_path.c lh-handler.h lhh_debug.h
+	$(CC) DEF=AMIGA lh_path.c OBJNAME=lh_path.o
+
+lh_arc.o: lh_arc.c lh-handler.h lhh_debug.h
+	$(CC) DEF=AMIGA lh_arc.c OBJNAME=lh_arc.o
+
+lh_pkt.o: lh_pkt.c lh-handler.h lhh_debug.h
+	$(CC) DEF=AMIGA lh_pkt.c OBJNAME=lh_pkt.o
+
+lhh_debug.o: lhh_debug.c lhh_debug.h lh-handler.h
+	$(CC) DEF=AMIGA lhh_debug.c OBJNAME=lhh_debug.o
+
+clean:
+	-$(RM) $(OBJS)
+	-$(RM) $(TARGET)
+	-$(RM) $(TARGET).info
+
+install:
+	copy $(TARGET) L:$(TARGET)
+	copy Devs/DOSDrivers/LHA DEVS:DOSDrivers/LHA

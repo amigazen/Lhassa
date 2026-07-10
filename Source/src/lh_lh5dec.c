@@ -3,9 +3,17 @@
  *
  * Copyright (c) 2026 amigazen project
  *
- * lh_lh5dec.c - LH4/LH5 decompression.
+ * lh_lh5dec.c - LH4/LH5/LH6/LH7 decompression (static Huffman + sliding dict).
  *
- * -lh5- archives use block Huffman (NC=510)
+ * Same block format; dictionary size / PBIT / NP differ:
+ *   lh4: 4 KiB  (dicbit 12, pbit 4, np 13)
+ *   lh5: 8 KiB  (dicbit 13, pbit 4, np 14)
+ *   lh6: 32 KiB (dicbit 15, pbit 5, np 16)
+ *   lh7: 64 KiB (dicbit 16, pbit 5, np 17)
+ *   lhx: UNLHA32 (dicbit 20, pbit 5, np 31) — 1 MiB history ring
+ *
+ * Decoder state is malloc'd — the Huffman tables alone are ~13 KiB and
+ * must not live on a typical Amiga process stack.
  */
 
 #include "lh_internal.h"
@@ -13,14 +21,11 @@
 #include <limits.h>
 #include <string.h>
 
-#define LH5_MAX_DICBIT    13
 #define LH5_MAXMATCH      256
 #define LH5_THRESHOLD     3
 #define LH5_NC            (UCHAR_MAX + LH5_MAXMATCH + 2 - LH5_THRESHOLD)
 #define LH5_CBIT          9
-#define LH5_NP            (LH5_MAX_DICBIT + 1)
 #define LH5_NT            (16 + 3)
-#define LH5_PBIT          4
 #define LH5_TBIT          5
 #define LH5_NPT           0x80
 
@@ -33,6 +38,8 @@ struct lh5_dec {
     unsigned char subbitbuf;
     unsigned char bitcount;
     unsigned short blocksize;
+    short np;
+    short pbit;
     unsigned short left[2 * LH5_NC - 1];
     unsigned short right[2 * LH5_NC - 1];
     unsigned char c_len[LH5_NC];
@@ -273,7 +280,7 @@ static unsigned short lh5_decode_c(struct lh5_dec *d)
         d->blocksize = lh5_getbits(d, 16);
         lh5_read_pt_len(d, LH5_NT, LH5_TBIT, 3);
         lh5_read_c_len(d);
-        lh5_read_pt_len(d, LH5_NP, LH5_PBIT, -1);
+        lh5_read_pt_len(d, d->np, d->pbit, -1);
     }
     d->blocksize--;
     j = d->c_table[d->bitbuf >> 4];
@@ -301,7 +308,7 @@ static unsigned short lh5_decode_p(struct lh5_dec *d)
     unsigned short mask;
 
     j = d->pt_table[d->bitbuf >> (16 - 8)];
-    if (j < LH5_NP) {
+    if (j < (unsigned short)d->np) {
         lh5_fillbuf(d, d->pt_len[j]);
     } else {
         lh5_fillbuf(d, 8);
@@ -313,7 +320,7 @@ static unsigned short lh5_decode_p(struct lh5_dec *d)
                 j = d->left[j];
             }
             mask = (unsigned short)(mask >> 1);
-        } while (j >= LH5_NP);
+        } while (j >= (unsigned short)d->np);
         lh5_fillbuf(d, (unsigned char)(d->pt_len[j] - 8));
     }
     if (j != 0) {
@@ -322,9 +329,21 @@ static unsigned short lh5_decode_p(struct lh5_dec *d)
     return j;
 }
 
-long lh_decompress_lh5(void *inBuf, unsigned long inSize, void *outBuf, unsigned long outSize)
+/*
+ * Shared LH4..LH7 / LHX decoder.  dicbit selects window size (2^dicbit);
+ * pbit is the bit width used when reading the position-tree length count;
+ * np is the number of position codes (usually dicbit+1; LHX uses 31).
+ */
+static long lh_decompress_lh_new(
+    void *inBuf,
+    unsigned long inSize,
+    void *outBuf,
+    unsigned long outSize,
+    unsigned int dicbit,
+    unsigned int pbit,
+    unsigned int np)
 {
-    struct lh5_dec dec;
+    struct lh5_dec *dec;
     unsigned char *text;
     unsigned char *out;
     unsigned long dicsiz;
@@ -337,24 +356,38 @@ long lh_decompress_lh5(void *inBuf, unsigned long inSize, void *outBuf, unsigned
     unsigned long c;
     int offset;
     unsigned char b;
+    long rc;
 
     if (!inBuf || !outBuf || inSize == 0 || outSize == 0) {
         return LH_ERR_INVALID_ARG;
     }
+    if (dicbit < 12 || dicbit > 20 || pbit < 4 || pbit > 5) {
+        return LH_ERR_INVALID_ARG;
+    }
+    if (np == 0 || np > LH5_NPT) {
+        return LH_ERR_INVALID_ARG;
+    }
 
-    dicsiz = 1UL << LH5_MAX_DICBIT;
+    dicsiz = 1UL << dicbit;
     text = (unsigned char *)malloc(dicsiz);
     if (!text) {
         return LH_ERR_NO_MEMORY;
     }
+    dec = (struct lh5_dec *)malloc(sizeof(*dec));
+    if (!dec) {
+        free(text);
+        return LH_ERR_NO_MEMORY;
+    }
 
-    memset(&dec, 0, sizeof(dec));
-    dec.in = (const unsigned char *)inBuf;
-    dec.in_size = inSize;
-    dec.in_pos = 0;
-    dec.compsize = inSize;
-    dec.blocksize = 0;
-    lh5_init_getbits(&dec);
+    memset(dec, 0, sizeof(*dec));
+    dec->in = (const unsigned char *)inBuf;
+    dec->in_size = inSize;
+    dec->in_pos = 0;
+    dec->compsize = inSize;
+    dec->blocksize = 0;
+    dec->np = (short)np;
+    dec->pbit = (short)pbit;
+    lh5_init_getbits(dec);
 
     memset(text, ' ', dicsiz);
     dicsiz1 = dicsiz - 1;
@@ -362,9 +395,10 @@ long lh_decompress_lh5(void *inBuf, unsigned long inSize, void *outBuf, unsigned
     count = 0;
     loc = 0;
     out = (unsigned char *)outBuf;
+    rc = LH_OK;
 
     while (count < outSize) {
-        c = lh5_decode_c(&dec);
+        c = lh5_decode_c(dec);
         if (c <= UCHAR_MAX) {
             text[loc++] = (unsigned char)c;
             if (loc == dicsiz) {
@@ -373,7 +407,7 @@ long lh_decompress_lh5(void *inBuf, unsigned long inSize, void *outBuf, unsigned
             out[count++] = (unsigned char)c;
         } else {
             j = c - (unsigned long)offset;
-            i = (loc - lh5_decode_p(&dec) - 1) & dicsiz1;
+            i = (loc - lh5_decode_p(dec) - 1) & dicsiz1;
             for (k = 0; k < j; k++) {
                 b = text[(i + k) & dicsiz1];
                 text[loc++] = b;
@@ -388,6 +422,33 @@ long lh_decompress_lh5(void *inBuf, unsigned long inSize, void *outBuf, unsigned
         }
     }
 
+    free(dec);
     free(text);
-    return LH_OK;
+    return rc;
+}
+
+long lh_decompress_lh4(void *inBuf, unsigned long inSize, void *outBuf, unsigned long outSize)
+{
+    return lh_decompress_lh_new(inBuf, inSize, outBuf, outSize, 12, 4, 13);
+}
+
+long lh_decompress_lh5(void *inBuf, unsigned long inSize, void *outBuf, unsigned long outSize)
+{
+    return lh_decompress_lh_new(inBuf, inSize, outBuf, outSize, 13, 4, 14);
+}
+
+long lh_decompress_lh6(void *inBuf, unsigned long inSize, void *outBuf, unsigned long outSize)
+{
+    return lh_decompress_lh_new(inBuf, inSize, outBuf, outSize, 15, 5, 16);
+}
+
+long lh_decompress_lh7(void *inBuf, unsigned long inSize, void *outBuf, unsigned long outSize)
+{
+    return lh_decompress_lh_new(inBuf, inSize, outBuf, outSize, 16, 5, 17);
+}
+
+long lh_decompress_lhx(void *inBuf, unsigned long inSize, void *outBuf, unsigned long outSize)
+{
+    /* UNLHA32 -lhx-: 1 MiB ring, OFFSET_BITS=5 → up to 31 position codes. */
+    return lh_decompress_lh_new(inBuf, inSize, outBuf, outSize, 20, 5, 31);
 }

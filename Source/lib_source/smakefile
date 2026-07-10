@@ -18,14 +18,14 @@ TARGET  = lh.library
 STATIC  = lh.lib
 BUILD_H = private/lh_build.h
 
-LHINCL  = idir=/include idir=/src DEF=AMIGA
-LHSOLO  = idir=/include idir=/src DEF=AMIGA DEF=LH_SOLO
+LHINCL  = idir=/src idir=/include DEF=AMIGA
+LHSOLO  = idir=/src idir=/include DEF=AMIGA DEF=LH_SOLO
 
-SHELL_OBJS = StartUp.o LibInit.o malloc.o lh_lvo.o lh_archive_dos.o
+SHELL_OBJS = StartUp.o LibInit.o malloc.o lh_lvo.o lh_archive_dos.o lh_amiga_time.o
 
 CORE_OBJS = \
     lh_error.o lh_crc.o lh_crypto.o lh_datetime.o \
-    lh_codec.o lh_lh5dec.o lh_header.o lh_archive.o lh_buffer.o
+    lh_codec.o lh_lh5dec.o lh_lh1dec.o lh_header.o lh_archive.o lh_buffer.o
 
 LIB_OBJS = $(SHELL_OBJS) $(CORE_OBJS)
 
@@ -58,6 +58,9 @@ lh_lvo.o: lh_lvo.c lh_funcs.h compiler.h lh_archive_dos.h
 lh_archive_dos.o: lh_archive_dos.c lh_archive_dos.h
 	$(CC) $(LHINCL) lh_archive_dos.c
 
+lh_amiga_time.o: lh_amiga_time.c
+	$(CC) $(LHINCL) lh_amiga_time.c
+
 lh_error.o: /src/lh_error.c
 	$(CC) $(LHINCL) /src/lh_error.c OBJNAME=lh_error.o
 
@@ -75,6 +78,9 @@ lh_codec.o: /src/lh_codec.c
 
 lh_lh5dec.o: /src/lh_lh5dec.c
 	$(CC) $(LHINCL) /src/lh_lh5dec.c OBJNAME=lh_lh5dec.o
+
+lh_lh1dec.o: /src/lh_lh1dec.c
+	$(CC) $(LHINCL) /src/lh_lh1dec.c OBJNAME=lh_lh1dec.o
 
 lh_header.o: /src/lh_header.c
 	$(CC) $(LHINCL) /src/lh_header.c OBJNAME=lh_header.o

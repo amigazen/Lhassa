@@ -380,6 +380,30 @@ static int lha_apply_option_cluster(const char *opt)
     return 1;
 }
 
+static int lha_looks_like_destdir(const char *path)
+{
+    size_t n;
+
+    if (!path || !path[0]) {
+        return 0;
+    }
+    n = strlen(path);
+    if (path[n - 1] == '/' || path[n - 1] == '\\' || path[n - 1] == ':') {
+        return 1;
+    }
+#if defined(LHA_AMIGA)
+    /*
+     * Amiga destination paths are often written without a trailing colon:
+     *   lha x archive.lha ram:test
+     * not only ram:test/ or ram:
+     */
+    if (strchr(path, ':') != NULL) {
+        return 1;
+    }
+#endif
+    return 0;
+}
+
 int lha_parse_args(int argc, char **argv, lha_args *out, char **unknown_opt)
 {
     int i;
@@ -433,9 +457,6 @@ int lha_parse_args(int argc, char **argv, lha_args *out, char **unknown_opt)
         out->files[out->file_count++] = lha_strdup(argv[i]);
     }
 
-    if (out->cmd == LHA_CMD_NONE || !out->archive) {
-        return 0;
-    }
     if (g_opts.preserve_paths < 0) {
         if (out->cmd == LHA_CMD_EXTRACT) {
             g_opts.ignore_paths = 0;
@@ -446,10 +467,7 @@ int lha_parse_args(int argc, char **argv, lha_args *out, char **unknown_opt)
     if (out->file_count > 0) {
         char *last = out->files[out->file_count - 1];
         if (out->cmd == LHA_CMD_EXTRACT || out->cmd == LHA_CMD_EXTRACT_FLAT) {
-            size_t last_len;
-            last_len = strlen(last);
-            if (last_len > 0 && (last[last_len - 1] == '/' || last[last_len - 1] == '\\'
-                || last[last_len - 1] == ':')) {
+            if (lha_looks_like_destdir(last)) {
                 out->destdir = last;
                 out->file_count--;
             }

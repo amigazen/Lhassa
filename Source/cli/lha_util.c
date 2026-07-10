@@ -6,6 +6,8 @@
  * lha_util.c - Filesystem helpers and archive rewrite for CLI.
  */
 
+#include "lha_platform.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,6 +92,9 @@ int lha_path_join(char *out, size_t outsz, const char *dir, const char *name)
 
 int lha_mkpath(const char *path)
 {
+#ifdef LHA_AMIGA
+    return lha_mkpath_amiga(path);
+#else
     char buf[512];
     char *p;
     size_t len;
@@ -112,6 +117,39 @@ int lha_mkpath(const char *path)
         }
     }
     return mkdir(buf, 0755) == 0 || (buf[0] != '\0');
+#endif
+}
+
+int lha_write_file(const char *path, const unsigned char *data, size_t len)
+{
+#ifdef LHA_AMIGA
+    return lha_write_file_amiga(path, data, len);
+#else
+    FILE *fp;
+    char dirbuf[512];
+    char *slash;
+
+    if (!path) {
+        return 0;
+    }
+    strncpy(dirbuf, path, sizeof(dirbuf) - 1);
+    dirbuf[sizeof(dirbuf) - 1] = '\0';
+    slash = strrchr(dirbuf, '/');
+    if (slash) {
+        *slash = '\0';
+        lha_mkpath(dirbuf);
+    }
+    fp = fopen(path, "wb");
+    if (!fp) {
+        return 0;
+    }
+    if (len > 0 && fwrite(data, 1, len, fp) != len) {
+        fclose(fp);
+        return 0;
+    }
+    fclose(fp);
+    return 1;
+#endif
 }
 
 int lha_match_pattern(const char *pattern, const char *name)
@@ -186,95 +224,14 @@ int lha_read_file(const char *path, unsigned char **data, size_t *len, lh_dateti
     return 1;
 }
 
-int lha_write_file(const char *path, const unsigned char *data, size_t len)
-{
-    FILE *fp;
-    char dirbuf[512];
-    char *slash;
-
-    if (!path) {
-        return 0;
-    }
-    strncpy(dirbuf, path, sizeof(dirbuf) - 1);
-    dirbuf[sizeof(dirbuf) - 1] = '\0';
-    slash = strrchr(dirbuf, '/');
-    if (slash) {
-        *slash = '\0';
-        lha_mkpath(dirbuf);
-    }
-    fp = fopen(path, "wb");
-    if (!fp) {
-        return 0;
-    }
-    if (len > 0 && fwrite(data, 1, len, fp) != len) {
-        fclose(fp);
-        return 0;
-    }
-    fclose(fp);
-    return 1;
-}
-
 lh_status lha_rewrite_archive(
     const char *archive,
     int (*keep)(const lh_entry *entry, void *ctx),
     void *ctx
 )
 {
-    char temp[512];
-    lh_reader *r;
-    lh_writer *w;
-    lh_entry entry;
-    lh_status st;
-    lh_status err;
-
-    if (!archive || !keep) {
-        return LH_ERR_INVALID_ARG;
-    }
-    strncpy(temp, archive, sizeof(temp) - 6);
-    temp[sizeof(temp) - 6] = '\0';
-    strcat(temp, ".$$$");
-
-    r = lh_reader_open(archive, &err);
-    if (!r) {
-        return err;
-    }
-    w = lh_writer_open(temp, (unsigned char)g_opts.header_level, g_opts.level, &err);
-    if (!w) {
-        lh_reader_close(&r);
-        return err;
-    }
-    for (;;) {
-        memset(&entry, 0, sizeof(entry));
-        st = lh_reader_next(r, &entry);
-        if (st != LH_OK) {
-            break;
-        }
-        if (!entry.filename) {
-            break;
-        }
-        if (keep(&entry, ctx)) {
-            st = lh_writer_add(w, entry.filename, entry.comment, entry.attrs,
-                &entry.datetime, g_opts.level, g_opts.store_only,
-                entry.data, entry.data_len);
-            lh_entry_clear(&entry);
-            if (st != LH_OK) {
-                break;
-            }
-        } else {
-            lh_entry_clear(&entry);
-        }
-    }
-    lh_reader_close(&r);
-    lh_writer_close(&w);
-    if (st != LH_OK && st != LH_ERR_TRUNCATED) {
-        remove(temp);
-        return st;
-    }
-    remove(archive);
-    if (rename(temp, archive) != 0) {
-        return LH_ERR_IO;
-    }
-    return LH_OK;
+    return lh_archive_rewrite(archive, keep, ctx,
+        (unsigned char)g_opts.header_level, g_opts.level, g_opts.store_only);
 }
 
 const char *lha_archive_name_for_display(const char *path)
@@ -396,6 +353,13 @@ void lha_add_message(const char *name)
 static const char *lha_progress_name;
 static size_t lha_progress_total;
 static int lha_progress_is_test;
+static const lha_args *lha_progress_filter_args;
+static int lha_progress_skip;
+
+void lha_progress_set_filter(const lha_args *args)
+{
+    lha_progress_filter_args = args;
+}
 
 static void lha_progress_finish_line(
     const char *name,
@@ -434,7 +398,7 @@ void lha_progress_update(void *ctx, size_t done, size_t total)
 
     (void)ctx;
     (void)total;
-    if (!lha_show_progress()) {
+    if (lha_progress_skip || !lha_show_progress()) {
         return;
     }
     if (g_opts.noop_fast_progress) {
@@ -453,7 +417,7 @@ void lha_progress_end(void *ctx, const char *name, int crc_ok,
 {
     (void)ctx;
     (void)size;
-    if (!lha_show_progress()) {
+    if (lha_progress_skip || !lha_show_progress()) {
         return;
     }
     lha_progress_finish_line(name, crc_ok, wanted_crc, computed_crc);
@@ -472,6 +436,14 @@ void lha_test_progress_end(void *ctx, const char *name, int crc_ok,
 
 void lha_extract_progress_begin(void *ctx, const char *name, size_t size)
 {
+    lha_progress_skip = 0;
+    if (lha_progress_filter_args) {
+        if (!lha_name_matches_any(name, lha_progress_filter_args->files,
+                lha_progress_filter_args->file_count)) {
+            lha_progress_skip = 1;
+            return;
+        }
+    }
     lha_progress_is_test = 0;
     lha_progress_begin(ctx, name, size);
 }

@@ -41,11 +41,22 @@ lh_method lh_method_from_string(const char *sig)
     if (strncmp(sig, LH_SIG_LH5, LH_SIG_LEN) == 0) return LH_METHOD_LH5;
     if (strncmp(sig, LH_SIG_LH6, LH_SIG_LEN) == 0) return LH_METHOD_LH6;
     if (strncmp(sig, LH_SIG_LH7, LH_SIG_LEN) == 0) return LH_METHOD_LH7;
+    if (strncmp(sig, LH_SIG_LHX, LH_SIG_LEN) == 0) return LH_METHOD_LHX;
     if (strncmp(sig, LH_SIG_LZS, LH_SIG_LEN) == 0) return LH_METHOD_LZS;
     if (strncmp(sig, LH_SIG_LZ5, LH_SIG_LEN) == 0) return LH_METHOD_LZ5;
     if (strncmp(sig, LH_SIG_LZ4, LH_SIG_LEN) == 0) return LH_METHOD_LZ4;
     if (strncmp(sig, LH_SIG_LHD, LH_SIG_LEN) == 0) return LH_METHOD_LHD;
-    return LH_METHOD_LH5;
+    if (strncmp(sig, LH_SIG_PM0, LH_SIG_LEN) == 0) return LH_METHOD_PM0;
+    if (strncmp(sig, LH_SIG_PM1, LH_SIG_LEN) == 0) return LH_METHOD_PM1;
+    if (strncmp(sig, LH_SIG_PM2, LH_SIG_LEN) == 0) return LH_METHOD_PM2;
+    if (strncmp(sig, LH_SIG_PMS, LH_SIG_LEN) == 0) return LH_METHOD_PMS;
+    if (strncmp(sig, LH_SIG_PC1, LH_SIG_LEN) == 0) return LH_METHOD_PC1;
+    /*
+     * Unknown method strings must not fall through to LH5: that fed
+     * PMarc -pm1-/-pm2- bitstreams into the LH5 decoder and crashed.
+     * PMS is already stubbed as unsupported in the codec switch.
+     */
+    return LH_METHOD_PMS;
 }
 
 const char *lh_method_to_string(lh_method method)
@@ -59,10 +70,16 @@ const char *lh_method_to_string(lh_method method)
     case LH_METHOD_LH5: return LH_SIG_LH5;
     case LH_METHOD_LH6: return LH_SIG_LH6;
     case LH_METHOD_LH7: return LH_SIG_LH7;
+    case LH_METHOD_LHX: return LH_SIG_LHX;
     case LH_METHOD_LZS: return LH_SIG_LZS;
     case LH_METHOD_LZ5: return LH_SIG_LZ5;
     case LH_METHOD_LZ4: return LH_SIG_LZ4;
     case LH_METHOD_LHD: return LH_SIG_LHD;
+    case LH_METHOD_PM0: return LH_SIG_PM0;
+    case LH_METHOD_PM1: return LH_SIG_PM1;
+    case LH_METHOD_PM2: return LH_SIG_PM2;
+    case LH_METHOD_PMS: return LH_SIG_PMS;
+    case LH_METHOD_PC1: return LH_SIG_PC1;
     default: return LH_SIG_LH5;
     }
 }

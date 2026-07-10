@@ -82,7 +82,8 @@ typedef struct lh_datetime {
 
 typedef unsigned char lh_attrs;
 
-#define LH_ATTR_DEFAULT ((lh_attrs)0x0f)
+/* Amiga fib_Protection: low rwed bits are inverted; 0 = ----rwed. */
+#define LH_ATTR_DEFAULT ((lh_attrs)0)
 
 typedef struct lh_entry {
     char *filename;
@@ -122,6 +123,16 @@ lh_status lh_datetime_pack(const lh_datetime *dt, unsigned long *out);
 void lh_datetime_unpack(unsigned long packed, lh_datetime *dt);
 lh_status lh_datetime_validate(const lh_datetime *dt);
 void lh_datetime_from_time_t(lh_datetime *dt, long t);
+void lh_datetime_now(lh_datetime *dt);
+void lh_datetime_from_unix(lh_datetime *dt, unsigned long unix_secs);
+unsigned long lh_datetime_to_unix(const lh_datetime *dt);
+#if defined(LH_AMIGA) || defined(AMIGA) || defined(__SASC)
+#ifndef DOS_DOS_H
+#include <dos/dos.h>
+#endif
+void lh_datetime_from_datestamp(const struct DateStamp *ds, lh_datetime *dt);
+void lh_datetime_to_datestamp(const lh_datetime *dt, struct DateStamp *ds);
+#endif
 
 lh_method lh_method_from_string(const char *sig);
 const char *lh_method_to_string(lh_method method);

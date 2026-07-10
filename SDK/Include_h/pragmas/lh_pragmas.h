@@ -13,7 +13,6 @@
 #endif /* CLIB_LH_PROTOS_H */
 
 /* "lh.library" */
-/*--- functions in V2 or higher --- */
 
 /* Classic LhLib API (Holger Krekel 1990) + extended codec */
 
@@ -21,6 +20,7 @@
 #pragma libcall LhBase DeleteBuffer 24 801
 #pragma libcall LhBase LhEncode 2A 801
 #pragma libcall LhBase LhDecode 30 801
+/*--- functions in V2 or higher --- */
 #pragma libcall LhBase LhCompress 36 8002
 #pragma libcall LhBase LhDecompress 3C 8002
 
@@ -43,13 +43,17 @@
 #pragma libcall LhBase LhSeek 96 02103
 #pragma libcall LhBase LhNameFromLock 9C 09803
 #pragma libcall LhBase LhAddEntry A2 0A9804
-#pragma libcall LhBase LhDeleteFile A8 9802
-#pragma libcall LhBase LhConcatArchive AE 9802
-#pragma libcall LhBase LhSetPassword B4 9802
-#pragma libcall LhBase LhReadData BA A9803
-#pragma libcall LhBase LhExtractEntry C0 A9803
-#pragma libcall LhBase LhTestEntry C6 9802
-#pragma libcall LhBase LhPrintEntry CC 9802
-#pragma libcall LhBase LhErr D2 00
+#pragma libcall LhBase LhAddEntryTagList A8 B0A9805
+#if defined(__SASC_60)
+#pragma tagcall LhBase LhAddEntryTags A8 B0A9805
+#endif /* __SASC_60 */
+#pragma libcall LhBase LhDeleteFile AE 9802
+#pragma libcall LhBase LhConcatArchive B4 9802
+#pragma libcall LhBase LhSetPassword BA 9802
+#pragma libcall LhBase LhReadData C0 A9803
+#pragma libcall LhBase LhExtractEntry C6 A9803
+#pragma libcall LhBase LhTestEntry CC 9802
+#pragma libcall LhBase LhPrintEntry D2 9802
+#pragma libcall LhBase LhErr D8 00
 
 #endif /* PRAGMAS_LH_PRAGMAS_H */

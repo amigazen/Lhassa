@@ -93,6 +93,7 @@ APTR FuncTab[] = {
     (APTR)LhSeek,
     (APTR)LhNameFromLock,
     (APTR)LhAddEntry,
+    (APTR)LhAddEntryTagList,
     (APTR)LhDeleteFile,
     (APTR)LhConcatArchive,
     (APTR)LhSetPassword,

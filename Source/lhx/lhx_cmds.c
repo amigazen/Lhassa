@@ -10,6 +10,7 @@
 #include <exec/execbase.h>
 #include <exec/memory.h>
 #include <dos/dos.h>
+#include <utility/tagitem.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/utility.h>
@@ -260,6 +261,10 @@ LONG lhx_cmd_add(struct LhxArgs *args)
     char arcname[512];
     LONG mode;
     BPTR testlock;
+    BPTR flock;
+    struct FileInfoBlock *fib;
+    struct TagItem tags[5];
+    ULONG n;
 
     if (!args->files || !args->files[0]) {
         lhx_print_error((STRPTR)"ADD requires FILES", 0);
@@ -277,6 +282,12 @@ LONG lhx_cmd_add(struct LhxArgs *args)
         lhx_print_error((STRPTR)"cannot open archive for output", LhErr());
         return RETURN_FAIL;
     }
+    fib = (struct FileInfoBlock *)AllocMem(
+        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!fib) {
+        LhCloseArchive(arc);
+        return RETURN_FAIL;
+    }
     for (i = 0; args->files[i] != NULL; i++) {
         data = NULL;
         len = 0;
@@ -291,11 +302,33 @@ LONG lhx_cmd_add(struct LhxArgs *args)
             continue;
         }
         lhx_add_line(args, (STRPTR)arcname);
-        if (!LhAddEntry(arc, (STRPTR)arcname, data, len)) {
+
+        n = 0;
+        flock = Lock(args->files[i], ACCESS_READ);
+        if (flock != (BPTR)NULL && Examine(flock, fib)) {
+            tags[n].ti_Tag = LHADD_Attrs;
+            tags[n].ti_Data = (ULONG)fib->fib_Protection;
+            n++;
+            tags[n].ti_Tag = LHADD_DateStamp;
+            tags[n].ti_Data = (ULONG)&fib->fib_Date;
+            n++;
+            if (fib->fib_Comment[0] != '\0') {
+                tags[n].ti_Tag = LHADD_Comment;
+                tags[n].ti_Data = (ULONG)fib->fib_Comment;
+                n++;
+            }
+        }
+        if (flock != (BPTR)NULL) {
+            UnLock(flock);
+        }
+        tags[n].ti_Tag = TAG_DONE;
+
+        if (!LhAddEntryTagList(arc, (STRPTR)arcname, data, len, tags)) {
             lhx_print_error((STRPTR)"add failed", LhErr());
             if (data) {
                 FreeMem(data, (ULONG)len);
             }
+            FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
             LhCloseArchive(arc);
             return RETURN_FAIL;
         }
@@ -303,6 +336,7 @@ LONG lhx_cmd_add(struct LhxArgs *args)
             FreeMem(data, (ULONG)len);
         }
     }
+    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
     LhCloseArchive(arc);
     return RETURN_OK;
 }

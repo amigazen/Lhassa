@@ -12,6 +12,7 @@
 #include <exec/types.h>
 #include <dos/dos.h>
 #include <dos/exall.h>
+#include <utility/tagitem.h>
 
 #include "compiler.h"
 
@@ -86,6 +87,12 @@ LONG __ASM__ __SAVE_DS__ LhAddEntry(
     __REG__(a1, STRPTR Name),
     __REG__(a2, APTR Data),
     __REG__(d0, LONG DataLen));
+LONG __ASM__ __SAVE_DS__ LhAddEntryTagList(
+    __REG__(a0, struct LhArchive *Archive),
+    __REG__(a1, STRPTR Name),
+    __REG__(a2, APTR Data),
+    __REG__(d0, LONG DataLen),
+    __REG__(a3, struct TagItem *TagList));
 LONG __ASM__ __SAVE_DS__ LhDeleteFile(
     __REG__(a0, struct LhArchive *Archive),
     __REG__(a1, STRPTR Name));

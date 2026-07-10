@@ -3,13 +3,18 @@
  *
  * Copyright (c) 2026 amigazen project
  *
- * lha_internal.h - Shared declarations for the LHA-compatible CLI.
+ * lha_internal.h - LhA CLI (ANSI C; Amiga hooks in lha_amiga.c).
  */
 
 #ifndef LHA_INTERNAL_H
 #define LHA_INTERNAL_H
 
-#include "../include/lh.h"
+#include "lha_platform.h"
+#include "/include/lh.h"
+
+#if !defined(HOST)
+void lh_utility_shutdown(void);
+#endif
 
 typedef enum lha_cmd {
     LHA_CMD_NONE = 0,
@@ -94,6 +99,11 @@ int lha_match_pattern(const char *pattern, const char *name);
 int lha_name_matches_any(const char *name, char **patterns, int count);
 int lha_read_file(const char *path, unsigned char **data, size_t *len, lh_datetime *dt);
 int lha_write_file(const char *path, const unsigned char *data, size_t len);
+#if defined(LHA_AMIGA)
+int lha_write_file_amiga(const char *path, const unsigned char *data, size_t len);
+int lha_mkpath_amiga(const char *path);
+#endif
+void lha_apply_file_metadata(const char *path, const lh_datetime *dt, lh_attrs attrs);
 
 lh_status lha_rewrite_archive(
     const char *archive,
@@ -112,6 +122,7 @@ void lha_operation_success(void);
 void lha_operation_failed(void);
 void lha_add_message(const char *name);
 
+void lha_progress_set_filter(const lha_args *args);
 void lha_extract_progress_begin(void *ctx, const char *name, size_t size);
 void lha_test_progress_begin(void *ctx, const char *name, size_t size);
 void lha_progress_update(void *ctx, size_t done, size_t total);

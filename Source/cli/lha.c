@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "lha_platform.h"
 #include "lha_internal.h"
 
 #ifdef __AMIGADATE__

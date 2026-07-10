@@ -9,7 +9,6 @@
 */
 
 /* "lh.library" */
-/*--- functions in V2 or higher --- */
 
 /* Classic LhLib API (Holger Krekel 1990) + extended codec */
 
@@ -25,6 +24,7 @@ ULONG __LhEncode(__reg("a6") void *, __reg("a0") struct LhBuffer *Buffer)="\tjsr
 ULONG __LhDecode(__reg("a6") void *, __reg("a0") struct LhBuffer *Buffer)="\tjsr\t-48(a6)";
 #define LhDecode(Buffer) __LhDecode(LhBase, (Buffer))
 
+/*--- functions in V2 or higher --- */
 ULONG __LhCompress(__reg("a6") void *, __reg("d0") LONG Method, __reg("a0") struct LhBuffer *Buffer)="\tjsr\t-54(a6)";
 #define LhCompress(Method, Buffer) __LhCompress(LhBase, (Method), (Buffer))
 
@@ -85,28 +85,36 @@ LONG __LhNameFromLock(__reg("a6") void *, __reg("a0") BPTR Lock, __reg("a1") STR
 LONG __LhAddEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") APTR Data, __reg("d0") LONG DataLen)="\tjsr\t-162(a6)";
 #define LhAddEntry(Archive, Name, Data, DataLen) __LhAddEntry(LhBase, (Archive), (Name), (Data), (DataLen))
 
-LONG __LhDeleteFile(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name)="\tjsr\t-168(a6)";
+LONG __LhAddEntryTagList(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") APTR Data, __reg("d0") LONG DataLen, __reg("a3") struct TagItem *TagList)="\tjsr\t-168(a6)";
+#define LhAddEntryTagList(Archive, Name, Data, DataLen, TagList) __LhAddEntryTagList(LhBase, (Archive), (Name), (Data), (DataLen), (TagList))
+
+#if !defined(NO_INLINE_STDARG) && (__STDC__ == 1L) && (__STDC_VERSION__ >= 199901L)
+LONG __LhAddEntryTags(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") APTR Data, __reg("d0") LONG DataLen, ...)="\tmove.l\ta3,-(a7)\n\tlea\t4(a7),a3\n\tjsr\t-168(a6)\n\tmovea.l\t(a7)+,a3";
+#define LhAddEntryTags(...) __LhAddEntryTags(LhBase, __VA_ARGS__)
+#endif
+
+LONG __LhDeleteFile(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name)="\tjsr\t-174(a6)";
 #define LhDeleteFile(Archive, Name) __LhDeleteFile(LhBase, (Archive), (Name))
 
-LONG __LhConcatArchive(__reg("a6") void *, __reg("a0") struct LhArchive *Dest, __reg("a1") STRPTR SourcePath)="\tjsr\t-174(a6)";
+LONG __LhConcatArchive(__reg("a6") void *, __reg("a0") struct LhArchive *Dest, __reg("a1") STRPTR SourcePath)="\tjsr\t-180(a6)";
 #define LhConcatArchive(Dest, SourcePath) __LhConcatArchive(LhBase, (Dest), (SourcePath))
 
-LONG __LhSetPassword(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Password)="\tjsr\t-180(a6)";
+LONG __LhSetPassword(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Password)="\tjsr\t-186(a6)";
 #define LhSetPassword(Archive, Password) __LhSetPassword(LhBase, (Archive), (Password))
 
-LONG __LhReadData(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") APTR *DataOut)="\tjsr\t-186(a6)";
+LONG __LhReadData(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") APTR *DataOut)="\tjsr\t-192(a6)";
 #define LhReadData(Archive, Name, DataOut) __LhReadData(LhBase, (Archive), (Name), (DataOut))
 
-LONG __LhExtractEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") STRPTR DestPath)="\tjsr\t-192(a6)";
+LONG __LhExtractEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name, __reg("a2") STRPTR DestPath)="\tjsr\t-198(a6)";
 #define LhExtractEntry(Archive, Name, DestPath) __LhExtractEntry(LhBase, (Archive), (Name), (DestPath))
 
-LONG __LhTestEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name)="\tjsr\t-198(a6)";
+LONG __LhTestEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name)="\tjsr\t-204(a6)";
 #define LhTestEntry(Archive, Name) __LhTestEntry(LhBase, (Archive), (Name))
 
-LONG __LhPrintEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name)="\tjsr\t-204(a6)";
+LONG __LhPrintEntry(__reg("a6") void *, __reg("a0") struct LhArchive *Archive, __reg("a1") STRPTR Name)="\tjsr\t-210(a6)";
 #define LhPrintEntry(Archive, Name) __LhPrintEntry(LhBase, (Archive), (Name))
 
-LONG __LhErr(__reg("a6") void *)="\tjsr\t-210(a6)";
+LONG __LhErr(__reg("a6") void *)="\tjsr\t-216(a6)";
 #define LhErr() __LhErr(LhBase)
 
 

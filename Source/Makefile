@@ -32,6 +32,7 @@ LIBSRC = \
 	src/lh_datetime.c \
 	src/lh_codec.c \
 	src/lh_lh5dec.c \
+	src/lh_lh1dec.c \
 	src/lh_header.c \
 	src/lh_archive.c \
 	src/lh_buffer.c

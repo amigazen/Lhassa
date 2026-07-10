@@ -18,6 +18,8 @@
 #include "lh/lhbase.h"
 #include "lh_archive_dos.h"
 
+#include <utility/tagitem.h>
+
 extern struct LHBase *LhBase;
 
 /* --- Original lh.library API (LhLib 1990) --- */
@@ -209,6 +211,16 @@ LONG __ASM__ __SAVE_DS__ LhAddEntry(
     __REG__(d0, LONG DataLen))
 {
     return lh_arc_add_entry(Archive, Name, Data, DataLen);
+}
+
+LONG __ASM__ __SAVE_DS__ LhAddEntryTagList(
+    __REG__(a0, struct LhArchive *Archive),
+    __REG__(a1, STRPTR Name),
+    __REG__(a2, APTR Data),
+    __REG__(d0, LONG DataLen),
+    __REG__(a3, struct TagItem *TagList))
+{
+    return lh_arc_add_entry_taglist(Archive, Name, Data, DataLen, TagList);
 }
 
 LONG __ASM__ __SAVE_DS__ LhDeleteFile(
