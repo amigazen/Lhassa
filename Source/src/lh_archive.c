@@ -219,31 +219,39 @@ int lh_stream_seek_cur(lh_stream *s, long delta)
 #endif
 }
 
-int lh_stream_rewind(lh_stream *s)
+int lh_stream_seek_set(lh_stream *s, long pos)
 {
-    if (!s) {
+    if (!s || pos < 0) {
         return 0;
     }
 #ifdef LH_AMIGA
     if (s->mem != NULL) {
-        s->mem_pos = 0;
+        if ((unsigned long)pos > s->mem_len) {
+            return 0;
+        }
+        s->mem_pos = (unsigned long)pos;
         return 1;
     }
     if (!s->lh_fh) {
         return 0;
     }
-    return Seek(s->lh_fh, 0, OFFSET_BEGINNING) != -1L;
+    return Seek(s->lh_fh, (LONG)pos, OFFSET_BEGINNING) != -1L;
 #elif defined(LH_HOST)
     if (!s->lh_fp) {
         return 0;
     }
-    return fseek(s->lh_fp, 0L, SEEK_SET) == 0;
+    return fseek(s->lh_fp, pos, SEEK_SET) == 0;
 #else
     return 0;
 #endif
 }
 
-long lh_stream_tell(lh_stream *s)
+int lh_stream_rewind(lh_stream *s)
+{
+    return lh_stream_seek_set(s, 0L);
+}
+
+long lh_stream_tell(const lh_stream *s)
 {
     if (!s) {
         return -1L;
@@ -877,7 +885,28 @@ lh_status lh_reader_next(lh_reader *r, lh_entry *entry)
         return LH_ERR_BAD_HEADER;
     }
     if (r->header_only) {
-        if (!lh_stream_seek_cur(&r->io, (long)meta.packed_size)) {
+        /*
+         * Skip packed payload.  Encrypted archives must still run the stream
+         * cipher over those bytes so a later decompress stays in sync.
+         */
+        if (r->has_password) {
+            packed = (unsigned char *)malloc(meta.packed_size);
+            if (!packed) {
+                lh_hdr_meta_clear(&meta);
+                lh_entry_clear(entry);
+                return LH_ERR_NO_MEMORY;
+            }
+            n = lh_stream_read(&r->io, packed, meta.packed_size);
+            if (n != meta.packed_size) {
+                free(packed);
+                lh_hdr_meta_clear(&meta);
+                lh_entry_clear(entry);
+                return LH_ERR_TRUNCATED;
+            }
+            lh_decrypt_buffer(&r->decrypt, packed, meta.packed_size);
+            free(packed);
+            packed = NULL;
+        } else if (!lh_stream_seek_cur(&r->io, (long)meta.packed_size)) {
             lh_hdr_meta_clear(&meta);
             lh_entry_clear(entry);
             return LH_ERR_IO;
@@ -943,6 +972,34 @@ int lh_reader_rewind(lh_reader *r)
     }
     /* Catalog walks set eof; must clear or lh_reader_next stays at EOF. */
     r->eof = 0;
+    if (r->has_password) {
+        lh_decrypt_init(&r->decrypt, r->password);
+    }
+    return 1;
+}
+
+long lh_reader_tell(const lh_reader *r)
+{
+    if (!r) {
+        return -1L;
+    }
+    return lh_stream_tell(&r->io);
+}
+
+int lh_reader_seek(lh_reader *r, long pos)
+{
+    if (!r) {
+        return 0;
+    }
+    if (!lh_stream_seek_set(&r->io, pos)) {
+        return 0;
+    }
+    r->eof = 0;
+    /*
+     * Decrypt is a stream cipher from the archive start.  Callers that seek
+     * mid-file with a password must walk/decrypt prior payloads themselves;
+     * this only re-inits (correct after rewind/seek-to-0).
+     */
     if (r->has_password) {
         lh_decrypt_init(&r->decrypt, r->password);
     }

@@ -140,6 +140,7 @@ struct lh_arc_entry_ref {
     char *comment;
     unsigned long packed;
     unsigned long orig;
+    unsigned long header_off; /* byte offset of this entry's header in the archive */
     lh_method method;
     unsigned char attrs;
     lh_datetime dt;
@@ -215,7 +216,8 @@ static int lh_arc_grow_catalog(struct LhArchive *arc)
     return 1;
 }
 
-static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry)
+static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry,
+    unsigned long header_off)
 {
     struct lh_arc_entry_ref *ref;
     char *name_copy;
@@ -255,6 +257,7 @@ static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry)
     ref->comment = comment_copy;
     ref->packed = (unsigned long)entry->packed_len;
     ref->orig = (unsigned long)entry->data_len;
+    ref->header_off = header_off;
     ref->method = entry->method;
     ref->attrs = entry->attrs;
     ref->dt = entry->datetime;
@@ -268,6 +271,7 @@ static int lh_arc_build_catalog(struct LhArchive *arc)
 {
     lh_entry entry;
     lh_status st;
+    long hdr_off;
 
     if (!arc || !arc->reader) {
         return 0;
@@ -275,6 +279,10 @@ static int lh_arc_build_catalog(struct LhArchive *arc)
     lh_arc_clear_catalog(arc);
     lh_reader_set_header_only(arc->reader, 1);
     for (;;) {
+        hdr_off = lh_reader_tell(arc->reader);
+        if (hdr_off < 0) {
+            return 0;
+        }
         memset(&entry, 0, sizeof(entry));
         st = lh_reader_next(arc->reader, &entry);
         if (st == LH_OK && !entry.filename) {
@@ -284,7 +292,7 @@ static int lh_arc_build_catalog(struct LhArchive *arc)
             lh_entry_clear(&entry);
             return 0;
         }
-        if (!lh_arc_catalog_add(arc, &entry)) {
+        if (!lh_arc_catalog_add(arc, &entry, (unsigned long)hdr_off)) {
             lh_entry_clear(&entry);
             return 0;
         }
@@ -556,88 +564,76 @@ static int lh_read_entry_at_index(struct LhArchive *arc, LONG index,
     if (!arc || !arc->reader || index < 0 || !out || !out_len) {
         return 0;
     }
-    if (arc->has_password) {
-        lh_reader_set_password(arc->reader, arc->password);
+    if (index >= arc->catalog_count) {
+        return 0;
     }
-    lh_reader_set_header_only(arc->reader, 0);
-    for (i = 0; ; i++) {
-        memset(&entry, 0, sizeof(entry));
-        st = lh_reader_next(arc->reader, &entry);
-        if (st == LH_OK && !entry.filename) {
-            break;
-        }
-        if (st != LH_OK) {
-            lh_entry_clear(&entry);
-            return 0;
-        }
-        if (i == index) {
-            if (entry.is_directory || !entry.data || entry.data_len == 0) {
-                lh_entry_clear(&entry);
-                return 0;
-            }
-            *out = entry.data;
-            *out_len = (unsigned long)entry.data_len;
-            entry.data = NULL;
-            if (crc_ok) {
-                *crc_ok = entry.crc_ok;
-            }
-            lh_entry_clear(&entry);
-            return 1;
-        }
-        lh_entry_clear(&entry);
-    }
-    return 0;
-}
-
-static int lh_read_entry_data(struct LhArchive *arc, const char *name,
-    unsigned char **out, unsigned long *out_len, int *crc_ok)
-{
-    lh_entry entry;
-    lh_status st;
-
-    if (!arc || !arc->reader || !name || !out || !out_len) {
+    if (arc->catalog[index].is_directory) {
         return 0;
     }
     if (arc->has_password) {
         lh_reader_set_password(arc->reader, arc->password);
     }
-    lh_reader_set_header_only(arc->reader, 0);
-    for (;;) {
-        memset(&entry, 0, sizeof(entry));
-        st = lh_reader_next(arc->reader, &entry);
-        if (st == LH_OK && !entry.filename) {
-            break;
-        }
-        if (st != LH_OK) {
-            lh_entry_clear(&entry);
+
+    /*
+     * Unencrypted: seek to the catalogued header and decompress only that
+     * member.  Encrypted: stream cipher must run from the start - skip prior
+     * payloads with header_only (decrypt, no inflate).
+     */
+    if (!arc->has_password) {
+        if (!lh_reader_seek(arc->reader,
+                (long)arc->catalog[index].header_off)) {
             return 0;
         }
-        if (strcmp(entry.filename, name) == 0) {
-            if (entry.is_directory) {
-                *out = NULL;
-                *out_len = 0;
-                if (crc_ok) {
-                    *crc_ok = 1;
-                }
-                lh_entry_clear(&entry);
-                return 1;
-            }
-            if (!entry.data || entry.data_len == 0) {
+    } else {
+        if (!lh_reader_rewind(arc->reader)) {
+            return 0;
+        }
+        lh_reader_set_header_only(arc->reader, 1);
+        for (i = 0; i < index; i++) {
+            memset(&entry, 0, sizeof(entry));
+            st = lh_reader_next(arc->reader, &entry);
+            if (st != LH_OK || !entry.filename) {
                 lh_entry_clear(&entry);
                 return 0;
             }
-            *out = entry.data;
-            *out_len = (unsigned long)entry.data_len;
-            entry.data = NULL;
-            if (crc_ok) {
-                *crc_ok = entry.crc_ok;
-            }
             lh_entry_clear(&entry);
-            return 1;
         }
-        lh_entry_clear(&entry);
     }
-    return 0;
+
+    lh_reader_set_header_only(arc->reader, 0);
+    memset(&entry, 0, sizeof(entry));
+    st = lh_reader_next(arc->reader, &entry);
+    if (st != LH_OK || !entry.filename) {
+        lh_entry_clear(&entry);
+        return 0;
+    }
+    if (entry.is_directory || !entry.data || entry.data_len == 0) {
+        lh_entry_clear(&entry);
+        return 0;
+    }
+    *out = entry.data;
+    *out_len = (unsigned long)entry.data_len;
+    entry.data = NULL;
+    if (crc_ok) {
+        *crc_ok = entry.crc_ok;
+    }
+    lh_entry_clear(&entry);
+    return 1;
+}
+
+static int lh_read_entry_data(struct LhArchive *arc, const char *name,
+    unsigned char **out, unsigned long *out_len, int *crc_ok)
+{
+    LONG index;
+
+    if (!arc || !name || !out || !out_len) {
+        return 0;
+    }
+    index = lh_find_entry_index(arc, name);
+    if (index < 0) {
+        return 0;
+    }
+    return lh_read_entry_at_index(arc, index, out, out_len, crc_ok);
 }
 
 static void lh_arc_drop_file_mem(struct LhArchive *arc)

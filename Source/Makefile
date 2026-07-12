@@ -35,7 +35,8 @@ LIBSRC = \
 	src/lh_lh1dec.c \
 	src/lh_header.c \
 	src/lh_archive.c \
-	src/lh_buffer.c
+	src/lh_buffer.c \
+	src/lh_lzhuf.c
 
 ifneq ($(HOST),1)
 # vbcc 68000: codec % emits __lmodu; C entry is _lmodu (see src/lmodu.c).

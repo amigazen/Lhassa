@@ -16,7 +16,7 @@ This is **Lhassa** - an open source implementation of LhA as a system service fo
 
 Key to the amigazen project approach is ensuring every project can be built with the same common set of development tools and configurations, so the ToolKit project was created to provide a standard configuration for Amiga development. All *amigazen project* releases are guaranteed to build against the ToolKit standard so that anyone can download and begin contributing straightaway without having to tailor the toolchain for their own setup.
 
-Stefan Boberg, Jim Cooper, David Tritscher, and Sven Ottemann (authors of the classic Amiga LhA releases) are not affiliated with the amigazen project. LhA was published as freeware/shareware for AmigaOS from 1991 onward; this tree is an independent reimplementation written from format documentation and reference behaviour, not a derivative of the original LhA sources.
+Stefan Boberg, Jim Cooper, David Tritscher, and Sven Ottemann (authors of the classic Amiga LhA releases) are not affiliated with amigazen project. LhA was published as freeware/shareware for AmigaOS from 1991 onward; this tree is an independent reimplementation written from format documentation and reference behaviour, not a derivative of the original LhA sources.
 
 The amigazen project philosophy is based on openness:
 

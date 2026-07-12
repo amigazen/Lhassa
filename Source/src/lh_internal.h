@@ -259,8 +259,9 @@ void lh_stream_close(lh_stream *s);
 size_t lh_stream_read(lh_stream *s, void *buf, size_t n);
 size_t lh_stream_write(lh_stream *s, const void *buf, size_t n);
 int lh_stream_seek_cur(lh_stream *s, long delta);
+int lh_stream_seek_set(lh_stream *s, long pos);
 int lh_stream_rewind(lh_stream *s);
-long lh_stream_tell(lh_stream *s);
+long lh_stream_tell(const lh_stream *s);
 
 #ifdef LH_AMIGA
 #ifndef EXEC_LIBRARIES_H
