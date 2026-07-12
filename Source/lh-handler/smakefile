@@ -13,8 +13,8 @@ LD      = slink
 RM      = delete force quiet
 
 # Enable for LH-handler.log (needed to see volume: splice lines).
-DEBUGDEF = DEF=LHH_DEBUG
-# DEBUGDEF =
+# DEBUGDEF = DEF=LHH_DEBUG
+DEBUGDEF =
 
 TARGET  = lh-handler
 OBJS    = lh-handler.o lh_path.o lh_arc.o lh_pkt.o lhh_debug.o lh_icon.o lh_drawer_info.o lh_volume.o

@@ -499,6 +499,140 @@ static int lh_leaf_seen_before(struct LhArchive *arc, const char *parent,
 }
 
 /*
+ * LHA often omits -lhd- headers (only path/file members).  Synthetic dirs
+ * used to get a zero lh_datetime -> Amiga epoch.  Prefer the newest stamp
+ * among entries under dirpath; fall back to the archive file mtime.
+ */
+static int lh_datetime_unset(const lh_datetime *dt)
+{
+    if (!dt) {
+        return 1;
+    }
+    if (dt->year < 1978 || dt->month == 0 || dt->day == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+static int lh_datetime_newer(const lh_datetime *a, const lh_datetime *b)
+{
+    if (lh_datetime_unset(a)) {
+        return 0;
+    }
+    if (lh_datetime_unset(b)) {
+        return 1;
+    }
+    if (a->year != b->year) {
+        return a->year > b->year;
+    }
+    if (a->month != b->month) {
+        return a->month > b->month;
+    }
+    if (a->day != b->day) {
+        return a->day > b->day;
+    }
+    if (a->hour != b->hour) {
+        return a->hour > b->hour;
+    }
+    if (a->minute != b->minute) {
+        return a->minute > b->minute;
+    }
+    return a->second > b->second;
+}
+
+static void lh_dir_datetime(struct LhArchive *arc, const char *dirpath,
+    lh_datetime *out)
+{
+    LONG i;
+    LONG plen;
+    int found;
+    lh_datetime best;
+    const char *n;
+
+    memset(out, 0, sizeof(*out));
+    if (!arc || !out) {
+        return;
+    }
+    memset(&best, 0, sizeof(best));
+    found = 0;
+    plen = (dirpath && dirpath[0]) ? (LONG)strlen(dirpath) : 0;
+
+    for (i = 0; i < arc->catalog_count; i++) {
+        n = arc->catalog[i].name;
+        if (!n) {
+            continue;
+        }
+        if (plen > 0) {
+            if (strncmp(n, dirpath, (size_t)plen) != 0) {
+                continue;
+            }
+            if (n[plen] != '\0' && n[plen] != '/') {
+                continue;
+            }
+        }
+        if (lh_datetime_unset(&arc->catalog[i].dt)) {
+            continue;
+        }
+        if (!found || lh_datetime_newer(&arc->catalog[i].dt, &best)) {
+            best = arc->catalog[i].dt;
+            found = 1;
+        }
+    }
+    if (found) {
+        *out = best;
+    } else if (arc->has_archive_dt
+        && !lh_datetime_unset(&arc->archive_dt)) {
+        *out = arc->archive_dt;
+    }
+}
+
+static void lh_join_dir_path(const char *parent, const char *leaf,
+    char *out, LONG outlen)
+{
+    LONG n;
+
+    if (!out || outlen <= 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!leaf || !leaf[0]) {
+        if (parent && parent[0]) {
+            strncpy(out, parent, (size_t)outlen - 1);
+            out[outlen - 1] = '\0';
+        }
+        return;
+    }
+    if (!parent || !parent[0]) {
+        strncpy(out, leaf, (size_t)outlen - 1);
+        out[outlen - 1] = '\0';
+        return;
+    }
+    n = (LONG)strlen(parent);
+    if (n + 1 + (LONG)strlen(leaf) >= outlen) {
+        strncpy(out, leaf, (size_t)outlen - 1);
+        out[outlen - 1] = '\0';
+        return;
+    }
+    strcpy(out, parent);
+    out[n] = '/';
+    strcpy(out + n + 1, leaf);
+}
+
+static void lh_fib_apply_dir_date(struct LhArchive *arc, const char *dirpath,
+    struct FileInfoBlock *fib)
+{
+    lh_datetime dt;
+
+    if (!arc || !fib) {
+        return;
+    }
+    lh_dir_datetime(arc, dirpath, &dt);
+    if (!lh_datetime_unset(&dt)) {
+        lh_dt_to_datestamp(&dt, &fib->fib_Date);
+    }
+}
+
+/*
  * Advance iterate_index to the next unique immediate child under parent.
  * Fills fib with leaf name; uses catalog metadata when an exact entry exists.
  */
@@ -508,6 +642,7 @@ static int lh_fill_next_child(struct LhLock *lock, struct FileInfoBlock *fib)
     const char *parent;
     LONG i;
     char leaf[108];
+    char dirpath[512];
     int is_dir;
     LONG exact;
     struct lh_arc_entry_ref synth;
@@ -540,6 +675,9 @@ static int lh_fill_next_child(struct LhLock *lock, struct FileInfoBlock *fib)
             if (is_dir) {
                 fib->fib_DirEntryType = ST_USERDIR;
                 fib->fib_EntryType = ST_USERDIR;
+                if (lh_datetime_unset(&arc->catalog[exact].dt)) {
+                    lh_fib_apply_dir_date(arc, arc->catalog[exact].name, fib);
+                }
             }
             return 1;
         }
@@ -548,6 +686,8 @@ static int lh_fill_next_child(struct LhLock *lock, struct FileInfoBlock *fib)
         synth.name = leaf;
         synth.is_directory = 1;
         synth.orig = 0;
+        lh_join_dir_path(parent, leaf, dirpath, (LONG)sizeof(dirpath));
+        lh_dir_datetime(arc, dirpath, &synth.dt);
         lh_ref_to_fib(&synth, fib);
         return 1;
     }
@@ -849,6 +989,7 @@ LONG lh_arc_examine(BPTR lock_bptr, struct FileInfoBlock *fib)
         fib->fib_EntryType = ST_USERDIR;
         fib->fib_FileName[0] = '\0';
         fib->fib_NumBlocks = 1;
+        lh_fib_apply_dir_date(arc, "", fib);
         lock->iterate_index = -1;
         return DOSTRUE;
     }
@@ -862,6 +1003,7 @@ LONG lh_arc_examine(BPTR lock_bptr, struct FileInfoBlock *fib)
         memset(&synth, 0, sizeof(synth));
         synth.name = (char *)leaf;
         synth.is_directory = 1;
+        lh_dir_datetime(arc, lock->name, &synth.dt);
         lh_ref_to_fib(&synth, fib);
         lock->iterate_index = -1;
         return DOSTRUE;
@@ -872,6 +1014,10 @@ LONG lh_arc_examine(BPTR lock_bptr, struct FileInfoBlock *fib)
     lh_ref_to_fib(&arc->catalog[lock->entry_index], fib);
     if (arc->catalog[lock->entry_index].is_directory) {
         lock->iterate_index = -1;
+        if (lh_datetime_unset(&arc->catalog[lock->entry_index].dt)) {
+            lh_fib_apply_dir_date(arc, arc->catalog[lock->entry_index].name,
+                fib);
+        }
     }
     return DOSTRUE;
 }
@@ -1012,7 +1158,9 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
     const char *parent;
     const char *comment;
     char leaf[108];
+    char dirpath[512];
     struct DateStamp ds;
+    lh_datetime ds_dt;
     int is_dirlock;
 
     if (!lock_bptr || !buffer || buf_size <= 0 || !control) {
@@ -1092,6 +1240,8 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
             synth.name = leaf;
             synth.is_directory = 1;
             synth.orig = 0;
+            lh_join_dir_path(parent, leaf, dirpath, (LONG)sizeof(dirpath));
+            lh_dir_datetime(arc, dirpath, &synth.dt);
             ref = &synth;
             is_dir = 1;
         }
@@ -1121,7 +1271,13 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
             ead->ed_Prot = (ULONG)ref->attrs;
         }
         if (type >= ED_DATE) {
-            lh_dt_to_datestamp(&ref->dt, &ds);
+            if (is_dir && lh_datetime_unset(&ref->dt)) {
+                lh_join_dir_path(parent, leaf, dirpath, (LONG)sizeof(dirpath));
+                lh_dir_datetime(arc, exact >= 0 ? ref->name : dirpath, &ds_dt);
+                lh_dt_to_datestamp(&ds_dt, &ds);
+            } else {
+                lh_dt_to_datestamp(&ref->dt, &ds);
+            }
             ead->ed_Days = (ULONG)ds.ds_Days;
             ead->ed_Mins = (ULONG)ds.ds_Minute;
             ead->ed_Ticks = (ULONG)ds.ds_Tick;

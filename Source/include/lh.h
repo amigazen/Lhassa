@@ -191,6 +191,8 @@ int lh_reader_archive_datetime(const lh_reader *r, lh_datetime *dt);
 
 lh_status lh_reader_next(lh_reader *r, lh_entry *entry);
 int lh_reader_rewind(lh_reader *r);
+long lh_reader_tell(const lh_reader *r);
+int lh_reader_seek(lh_reader *r, long pos);
 void lh_reader_close(lh_reader **r);
 void lh_entry_clear(lh_entry *entry);
 
