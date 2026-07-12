@@ -14,6 +14,7 @@ FROM     StartUp.o
          lh_header.o
          lh_archive.o
          lh_buffer.o
+         lh_lzhuf.o
 LIB      LIB:sc.lib LIB:amiga.lib
 NODEBUG
 TO       lh.library

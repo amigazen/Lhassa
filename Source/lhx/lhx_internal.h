@@ -11,6 +11,7 @@
 
 #include <exec/types.h>
 #include <dos/dos.h>
+#include <workbench/startup.h>
 
 #define LHX_PATH_LEN 512
 #define LHX_PASS_LEN 256
@@ -67,5 +68,9 @@ LONG lhx_cmd_extract(struct LhxArgs *args, LONG with_paths);
 LONG lhx_cmd_add(struct LhxArgs *args);
 LONG lhx_cmd_test(struct LhxArgs *args);
 LONG lhx_cmd_print(struct LhxArgs *args);
+
+/* Workbench startup: remap project path to LHA: and open as drawer. */
+int lhx_real_to_lha_path(STRPTR real, STRPTR out, LONG outlen);
+LONG lhx_wb_startup(struct WBStartup *wb);
 
 #endif /* LHX_INTERNAL_H */

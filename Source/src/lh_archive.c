@@ -367,6 +367,9 @@ static void lh_reader_capture_mtime(lh_reader *r, const char *path)
 
 static lh_method lh_level_to_method(lh_level level, int store_only)
 {
+    if (level == LH_LEVEL_LHD) {
+        return LH_METHOD_LHD;
+    }
     if (store_only) {
         return LH_METHOD_LH0;
     }

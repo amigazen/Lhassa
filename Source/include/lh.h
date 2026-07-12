@@ -67,7 +67,8 @@ typedef enum lh_level {
     LH_LEVEL_LH1 = 1,
     LH_LEVEL_LH5 = 5,
     LH_LEVEL_LH6 = 6,
-    LH_LEVEL_LH7 = 7
+    LH_LEVEL_LH7 = 7,
+    LH_LEVEL_LHD = 11   /* directory entry (-lhd-) */
 } lh_level;
 
 /* LHA packed DOS date/time (same bit layout as MS-DOS). */

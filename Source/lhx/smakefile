@@ -11,7 +11,7 @@ LD      = slink
 RM      = delete force quiet
 
 TARGET  = LhX
-OBJS    = lhx.o lhx_cmds.o lhx_util.o
+OBJS    = lhx.o lhx_cmds.o lhx_util.o lhx_wb.o
 
 all: $(TARGET)
 
@@ -28,6 +28,9 @@ lhx_cmds.o: lhx_cmds.c lhx_internal.h
 
 lhx_util.o: lhx_util.c lhx_internal.h
 	$(CC) DEF=AMIGA lhx_util.c OBJNAME=lhx_util.o
+
+lhx_wb.o: lhx_wb.c lhx_internal.h
+	$(CC) DEF=AMIGA lhx_wb.c OBJNAME=lhx_wb.o
 
 clean:
 	-$(RM) $(OBJS)

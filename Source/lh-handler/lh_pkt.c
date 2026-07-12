@@ -5,14 +5,19 @@
  *
  * lh_pkt.c - Safe dos packets from inside the handler.
  *
- * Host FS access uses SendPkt to the *other* handler with a private reply
- * port so we never WaitPort on the handler's pr_MsgPort (LHA: packets).
- * Volumes are resolved via LockDosList; never GetDeviceProc() (uses
- * pr_MsgPort and deadlocks from inside a handler).
+ * Host FS access mirrors HappyENV's DoPacket pattern: PutMsg to the *other*
+ * handler's fl_Task / dol_Task, WaitPort on a *private* reply port (never
+ * pr_MsgPort / gd_Port — that would deadlock with LHA: client packets).
+ * Volumes via DosList; DeviceProc only as fallback (never GetDeviceProc).
+ *
+ * HappyENV opens ENVARC files with one LOCATE/FINDINPUT using the full
+ * relative path as a single BSTR from the assign root.  We try that first,
+ * then fall back to per-component walks for handlers that reject paths.
  */
 
 #include "lh-handler.h"
 
+#include <exec/nodes.h>
 #include <dos/dosextens.h>
 
 LONG lhh_host_unlock(BPTR lock);
@@ -34,6 +39,13 @@ LONG lhh_host_unlock(BPTR lock);
 /* Shared BSTR scratch - handler is single-threaded. */
 static UBYTE lhh_bbuf[260];
 
+/*
+ * HappyENV PacketPort / MyPacket: one private reply port + StandardPacket
+ * for the life of the handler (Create/Delete per call wastes mem and can fail).
+ */
+static struct MsgPort *lhh_pkt_reply;
+static struct StandardPacket *lhh_pkt_sp;
+
 #ifndef DLT_VOLUME
 #define DLT_VOLUME      2
 #endif
@@ -47,23 +59,121 @@ static LONG lhh_dopkt(struct MsgPort *handlerport, LONG action,
 static BPTR lhh_make_bstr(UBYTE *buf, const char *s);
 BPTR lhh_host_parentdir(BPTR lock);
 
-/*
- * Volume/assign lookup via DeviceProc.  Never call GetDeviceProc() from a
- * handler: it waits on pr_MsgPort, the same port used for LHA: packets.
- *
- * DeviceProc returns the handler MsgPort.  For assigns, IoErr() holds a
- * directory lock (do not UnLock it).  For volumes, IoErr() is typically 0.
- */
+static int lhh_pkt_ensure(void)
+{
+    if (lhh_pkt_reply != NULL && lhh_pkt_sp != NULL) {
+        return 1;
+    }
+    if (lhh_pkt_reply == NULL) {
+        lhh_pkt_reply = CreateMsgPort();
+        if (lhh_pkt_reply == NULL) {
+            return 0;
+        }
+    }
+    if (lhh_pkt_sp == NULL) {
+        lhh_pkt_sp = (struct StandardPacket *)AllocMem(
+            sizeof(struct StandardPacket), MEMF_PUBLIC | MEMF_CLEAR);
+        if (lhh_pkt_sp == NULL) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+void lhh_host_pkt_cleanup(void)
+{
+    if (lhh_pkt_sp != NULL) {
+        FreeMem(lhh_pkt_sp, sizeof(struct StandardPacket));
+        lhh_pkt_sp = NULL;
+    }
+    if (lhh_pkt_reply != NULL) {
+        DeleteMsgPort(lhh_pkt_reply);
+        lhh_pkt_reply = NULL;
+    }
+}
+
 struct LhhHostVol {
     struct MsgPort *port;
-    BPTR start_lock;  /* assign lock from IoErr(), or ZERO for volume root */
+    BPTR start_lock;  /* assign dol_Lock (do not UnLock), or ZERO */
 };
 
 /*
- * Resolve "Vol:rest" via DeviceProc.  DeviceProc returns the handler port
- * and, for assigns, leaves a directory lock in IoErr() (do not UnLock it;
- * DupLock if needed).  Never GetDeviceProc (waits on pr_MsgPort).
- * Never use dol_LockList as a directory lock.
+ * Volume/assign lookup via DosList (AttemptLockDosList).  Avoid DeviceProc
+ * when possible: its IoErr() lock-vs-error ambiguity breaks nested walks,
+ * and it may LockDosList.  Assigns use dol_Lock (do not UnLock it).
+ */
+static int lhh_host_resolve_doslist(const char *vol, LONG vlen,
+    struct LhhHostVol *hv)
+{
+    struct DosList *dl;
+    struct DosList *e;
+    STRPTR bname;
+    LONG n;
+    LONG i;
+    ULONG flags;
+
+    if (vol == NULL || vlen <= 0 || hv == NULL || LhhGD == NULL) {
+        return 0;
+    }
+
+    flags = LDF_DEVICES | LDF_VOLUMES | LDF_ASSIGNS | LDF_READ;
+    dl = lhh_attempt_lock_doslist(LhhGD, flags);
+    if (dl == NULL) {
+        return 0;
+    }
+
+    e = dl;
+    while ((e = NextDosEntry(e, flags)) != NULL) {
+        bname = (STRPTR)BADDR(e->dol_Name);
+        if (bname == NULL) {
+            continue;
+        }
+        n = (LONG)((UBYTE *)bname)[0];
+        if (n != vlen) {
+            continue;
+        }
+        for (i = 0; i < n; i++) {
+            char a;
+            char b;
+
+            a = bname[i + 1];
+            b = vol[i];
+            if (a >= 'A' && a <= 'Z') {
+                a = (char)(a - 'A' + 'a');
+            }
+            if (b >= 'A' && b <= 'Z') {
+                b = (char)(b - 'A' + 'a');
+            }
+            if (a != b) {
+                break;
+            }
+        }
+        if (i != n) {
+            continue;
+        }
+        if (e->dol_Task == NULL) {
+            continue;
+        }
+        hv->port = e->dol_Task;
+        /*
+         * DLT_DIRECTORY (assign): dol_Lock is the assign root.
+         * Volumes/devices: LOCATE from ZERO (never dol_LockList).
+         */
+        if (e->dol_Type == DLT_DIRECTORY && e->dol_Lock != ZERO) {
+            hv->start_lock = e->dol_Lock;
+        } else {
+            hv->start_lock = ZERO;
+        }
+        UnLockDosList(flags);
+        return 1;
+    }
+    UnLockDosList(flags);
+    return 0;
+}
+
+/*
+ * Resolve "Vol:rest" to handler port + optional assign start lock.
+ * Prefer DosList; fall back to DeviceProc (never GetDeviceProc).
  */
 static int lhh_host_resolve_name(STRPTR name, struct LhhHostVol *hv,
     const char **rest_out)
@@ -71,6 +181,7 @@ static int lhh_host_resolve_name(STRPTR name, struct LhhHostVol *hv,
     struct MsgPort *port;
     const char *rest;
     LONG i;
+    LONG ioe;
     static char volname[128];
 
     if (name == NULL || name[0] == '\0' || hv == NULL) {
@@ -87,26 +198,41 @@ static int lhh_host_resolve_name(STRPTR name, struct LhhHostVol *hv,
     if (volname[0] == '\0') {
         return 0;
     }
-    volname[i] = ':';
-    volname[i + 1] = '\0';
+    volname[i] = '\0';
     rest = name;
     if (name[i] == ':') {
         rest = name + i + 1;
     } else {
-        /* "AmigaZen" with no colon - still DeviceProc("AmigaZen:") */
         rest = name + i;
     }
 
+    if (lhh_host_resolve_doslist(volname, i, hv)) {
+        if (rest_out != NULL) {
+            *rest_out = rest;
+        }
+        return 1;
+    }
+
+    /* Fallback: DeviceProc("Vol:") - clear IoErr so a stale code is not a lock. */
+    volname[i] = ':';
+    volname[i + 1] = '\0';
+    SetIoErr(0);
     port = DeviceProc((STRPTR)volname);
     if (port == NULL) {
         return 0;
     }
     hv->port = port;
+    ioe = IoErr();
     /*
-     * For assigns, IoErr() holds a lock on the assigned directory.
-     * For volumes/devices it is typically ZERO (use LOCATE "" with Arg1=0).
+     * DeviceProc: assign lock in IoErr(), else 0.  Error codes are small;
+     * real BPTRs from AllocMem are rarely in the dos error range.  If
+     * DosList failed we already tried; treat tiny IoErr as "no lock".
      */
-    hv->start_lock = (BPTR)IoErr();
+    if (ioe != 0 && (ULONG)ioe > 512UL) {
+        hv->start_lock = (BPTR)ioe;
+    } else {
+        hv->start_lock = ZERO;
+    }
     if (rest_out != NULL) {
         *rest_out = rest;
     }
@@ -143,7 +269,8 @@ static BPTR lhh_host_root_lock(struct LhhHostVol *hv, LONG *res2)
 }
 
 /*
- * Send one packet to handlerport and wait on a private reply port.
+ * Send one packet to handlerport and wait on the private reply port.
+ * HappyENV DoPacket: PutMsg + WaitPort/GetMsg until LN_NAME is the packet.
  * Returns dp_Res1; *res2 receives dp_Res2 when non-NULL.
  */
 static LONG lhh_dopkt(struct MsgPort *handlerport, LONG action,
@@ -152,6 +279,7 @@ static LONG lhh_dopkt(struct MsgPort *handlerport, LONG action,
     struct MsgPort *reply;
     struct StandardPacket *sp;
     struct DosPacket *pkt;
+    struct Message *msg;
     LONG res1;
 
     if (handlerport == NULL) {
@@ -161,28 +289,23 @@ static LONG lhh_dopkt(struct MsgPort *handlerport, LONG action,
         return DOSFALSE;
     }
 
-    reply = CreateMsgPort();
-    if (reply == NULL) {
+    if (!lhh_pkt_ensure()) {
         if (res2) {
             *res2 = ERROR_NO_FREE_STORE;
         }
         return DOSFALSE;
     }
 
-    sp = (struct StandardPacket *)AllocMem(sizeof(struct StandardPacket),
-        MEMF_PUBLIC | MEMF_CLEAR);
-    if (sp == NULL) {
-        DeleteMsgPort(reply);
-        if (res2) {
-            *res2 = ERROR_NO_FREE_STORE;
-        }
-        return DOSFALSE;
-    }
-
+    reply = lhh_pkt_reply;
+    sp = lhh_pkt_sp;
     pkt = &sp->sp_Pkt;
+
+    sp->sp_Msg.mn_Node.ln_Succ = NULL;
+    sp->sp_Msg.mn_Node.ln_Pred = NULL;
+    sp->sp_Msg.mn_Node.ln_Type = NT_MESSAGE;
     sp->sp_Msg.mn_Node.ln_Name = (char *)pkt;
-    sp->sp_Msg.mn_Length = (UWORD)sizeof(struct StandardPacket);
     sp->sp_Msg.mn_ReplyPort = reply;
+    sp->sp_Msg.mn_Length = (UWORD)sizeof(struct StandardPacket);
 
     pkt->dp_Link = &sp->sp_Msg;
     pkt->dp_Port = reply;
@@ -192,18 +315,27 @@ static LONG lhh_dopkt(struct MsgPort *handlerport, LONG action,
     pkt->dp_Arg3 = arg3;
     pkt->dp_Arg4 = arg4;
     pkt->dp_Arg5 = arg5;
+    pkt->dp_Res1 = 0;
+    pkt->dp_Res2 = 0;
 
     PutMsg(handlerport, &sp->sp_Msg);
-    WaitPort(reply);
-    GetMsg(reply);
+
+    /* HappyENV GetPacket: ignore non-dos messages on the private port. */
+    for (;;) {
+        WaitPort(reply);
+        msg = GetMsg(reply);
+        if (msg == NULL) {
+            continue;
+        }
+        if (msg->mn_Node.ln_Name == (char *)pkt) {
+            break;
+        }
+    }
 
     res1 = pkt->dp_Res1;
     if (res2 != NULL) {
         *res2 = pkt->dp_Res2;
     }
-
-    FreeMem(sp, sizeof(struct StandardPacket));
-    DeleteMsgPort(reply);
     return res1;
 }
 
@@ -333,6 +465,7 @@ BPTR lhh_host_lock(STRPTR name, LONG mode)
     const char *rest;
     BPTR root;
     BPTR result;
+    BPTR bstr;
     LONG res2;
 
     if (name == NULL || name[0] == '\0') {
@@ -354,6 +487,19 @@ BPTR lhh_host_lock(STRPTR name, LONG mode)
         return root;
     }
 
+    /*
+     * HappyENV CalcFullName: one LOCATE_OBJECT with the full relative path
+     * as a single BSTR from the volume/assign root (FFS and most handlers).
+     */
+    bstr = lhh_make_bstr(lhh_bbuf, rest);
+    result = (BPTR)lhh_dopkt(hv.port, ACTION_LOCATE_OBJECT,
+        (LONG)root, (LONG)bstr, mode, 0, 0, &res2);
+    if (result != ZERO) {
+        lhh_host_unlock(root);
+        return result;
+    }
+
+    /* Fallback: per-component walk for handlers that reject multi-part BSTRs. */
     result = lhh_host_walk(hv.port, root, rest, mode, &res2);
     lhh_host_unlock(root);
     if (result == ZERO) {
@@ -365,6 +511,7 @@ BPTR lhh_host_lock(STRPTR name, LONG mode)
 /*
  * Locate one name relative to an existing host lock (Amiga packet model).
  * Prefer this over rebuilding "Vol:path/name" strings for nested walks.
+ * Name may contain '/' — try one LOCATE first (HappyENV), then walk.
  */
 BPTR lhh_host_lock_from(BPTR parent, STRPTR name, LONG mode)
 {
@@ -372,6 +519,8 @@ BPTR lhh_host_lock_from(BPTR parent, STRPTR name, LONG mode)
     BPTR bstr;
     LONG res2;
     BPTR result;
+    int has_slash;
+    LONG i;
 
     if (parent == ZERO || name == NULL || name[0] == '\0') {
         return ZERO;
@@ -383,13 +532,29 @@ BPTR lhh_host_lock_from(BPTR parent, STRPTR name, LONG mode)
     if (lhh_is_parent_name(name)) {
         return lhh_host_parentdir(parent);
     }
+
+    has_slash = 0;
+    for (i = 0; name[i] != '\0'; i++) {
+        if (name[i] == '/') {
+            has_slash = 1;
+            break;
+        }
+    }
+
     bstr = lhh_make_bstr(lhh_bbuf, name);
     result = (BPTR)lhh_dopkt(fl->fl_Task, ACTION_LOCATE_OBJECT,
         (LONG)parent, (LONG)bstr, mode, 0, 0, &res2);
-    if (result == ZERO) {
-        SetIoErr(res2);
+    if (result != ZERO) {
+        return result;
     }
-    return result;
+    if (has_slash) {
+        result = lhh_host_walk(fl->fl_Task, parent, name, mode, &res2);
+        if (result != ZERO) {
+            return result;
+        }
+    }
+    SetIoErr(res2);
+    return ZERO;
 }
 
 LONG lhh_host_unlock(BPTR lock)
@@ -701,6 +866,7 @@ BPTR lhh_host_open(STRPTR name, LONG mode)
     BPTR root;
     BPTR dirlock;
     BPTR bstr;
+    struct FileHandle *fh;
 
     if (name == NULL || name[0] == '\0') {
         return ZERO;
@@ -724,6 +890,33 @@ BPTR lhh_host_open(STRPTR name, LONG mode)
         return ZERO;
     }
 
+    fh = (struct FileHandle *)AllocMem(sizeof(struct FileHandle),
+        MEMF_PUBLIC | MEMF_CLEAR);
+    if (fh == NULL) {
+        lhh_host_unlock(root);
+        SetIoErr(ERROR_NO_FREE_STORE);
+        return ZERO;
+    }
+
+    /*
+     * HappyENV: FINDINPUT from assign/volume root with the full relative
+     * path as one BSTR (e.g. "sys/def_drawer.info" on ENV:).
+     */
+    if (rest[0] != '\0') {
+        bstr = lhh_make_bstr(lhh_bbuf, rest);
+        result = (BPTR)lhh_dopkt(hv.port, action,
+            (LONG)MKBADDR(fh), (LONG)root, (LONG)bstr, 0, 0, &res2);
+        if (result != DOSFALSE && fh->fh_Type != NULL) {
+            lhh_host_unlock(root);
+            return MKBADDR(fh);
+        }
+        /* Clear FH for retry; some handlers partially fill on failure. */
+        fh->fh_Type = NULL;
+        fh->fh_Port = NULL;
+        fh->fh_Arg1 = 0;
+    }
+
+    /* Fallback: walk to parent dir, FIND leaf name only. */
     lhh_host_split_dir_file(rest, dirpart, (LONG)sizeof(dirpart),
         filepart, (LONG)sizeof(filepart));
     if (dirpart[0] != '\0') {
@@ -732,42 +925,34 @@ BPTR lhh_host_open(STRPTR name, LONG mode)
         root = ZERO;
     } else {
         dirlock = root;
+        root = ZERO;
     }
     if (dirlock == ZERO) {
-        if (root != ZERO) {
-            lhh_host_unlock(root);
-        }
+        FreeMem(fh, sizeof(struct FileHandle));
         SetIoErr(res2);
+        return ZERO;
+    }
+    if (filepart[0] == '\0') {
+        lhh_host_unlock(dirlock);
+        FreeMem(fh, sizeof(struct FileHandle));
+        SetIoErr(ERROR_OBJECT_WRONG_TYPE);
         return ZERO;
     }
 
     bstr = lhh_make_bstr(lhh_bbuf, filepart);
-    {
-        struct FileHandle *fh;
-
-        fh = (struct FileHandle *)AllocMem(sizeof(struct FileHandle),
-            MEMF_PUBLIC | MEMF_CLEAR);
-        if (fh == NULL) {
-            lhh_host_unlock(dirlock);
-            SetIoErr(ERROR_NO_FREE_STORE);
-            return ZERO;
-        }
-
-        result = (BPTR)lhh_dopkt(hv.port, action,
-            (LONG)MKBADDR(fh), (LONG)dirlock, (LONG)bstr, 0, 0, &res2);
-        lhh_host_unlock(dirlock);
+    result = (BPTR)lhh_dopkt(hv.port, action,
+        (LONG)MKBADDR(fh), (LONG)dirlock, (LONG)bstr, 0, 0, &res2);
+    lhh_host_unlock(dirlock);
+    if (result == DOSFALSE || fh->fh_Type == NULL) {
         if (result == DOSFALSE) {
             SetIoErr(res2);
-            FreeMem(fh, sizeof(struct FileHandle));
-            return ZERO;
-        }
-        if (fh->fh_Type == NULL) {
+        } else {
             SetIoErr(ERROR_OBJECT_NOT_FOUND);
-            FreeMem(fh, sizeof(struct FileHandle));
-            return ZERO;
         }
-        return MKBADDR(fh);
+        FreeMem(fh, sizeof(struct FileHandle));
+        return ZERO;
     }
+    return MKBADDR(fh);
 }
 
 LONG lhh_host_close(BPTR fh_bptr)
@@ -881,6 +1066,17 @@ LONG lhh_host_delete(STRPTR name)
         return DOSFALSE;
     }
 
+    /* HappyENV-style: DELETE with full relative path from root. */
+    if (rest[0] != '\0') {
+        bstr = lhh_make_bstr(lhh_bbuf, rest);
+        res1 = lhh_dopkt(hv.port, ACTION_DELETE_OBJECT,
+            (LONG)root, (LONG)bstr, 0, 0, 0, &res2);
+        if (res1) {
+            lhh_host_unlock(root);
+            return res1;
+        }
+    }
+
     lhh_host_split_dir_file(rest, dirpart, (LONG)sizeof(dirpart),
         filepart, (LONG)sizeof(filepart));
     if (dirpart[0] != '\0') {
@@ -898,6 +1094,65 @@ LONG lhh_host_delete(STRPTR name)
     res1 = lhh_dopkt(hv.port, ACTION_DELETE_OBJECT,
         (LONG)dirlock, (LONG)bstr, 0, 0, 0, &res2);
     lhh_host_unlock(dirlock);
+    if (!res1) {
+        SetIoErr(res2);
+    }
+    return res1;
+}
+
+/*
+ * Host Rename via ACTION_RENAME_OBJECT on the volume handler (private reply).
+ * oldpath and newpath are full Amiga paths on the same volume.
+ */
+LONG lhh_host_rename(STRPTR oldpath, STRPTR newpath)
+{
+    struct LhhHostVol hv;
+    struct LhhHostVol hv2;
+    const char *rest;
+    const char *rest2;
+    LONG res2;
+    LONG res1;
+    BPTR root;
+    BPTR root2;
+    BPTR bstr_from;
+    BPTR bstr_to;
+    static UBYTE bbuf2[260];
+
+#ifndef ERROR_RENAME_ACROSS_DEVICES
+#define ERROR_RENAME_ACROSS_DEVICES 215
+#endif
+
+    if (oldpath == NULL || newpath == NULL
+        || oldpath[0] == '\0' || newpath[0] == '\0') {
+        return DOSFALSE;
+    }
+    if (!lhh_host_resolve_name(oldpath, &hv, &rest)) {
+        return DOSFALSE;
+    }
+    if (!lhh_host_resolve_name(newpath, &hv2, &rest2)) {
+        return DOSFALSE;
+    }
+    if (hv.port != hv2.port) {
+        SetIoErr(ERROR_RENAME_ACROSS_DEVICES);
+        return DOSFALSE;
+    }
+    root = lhh_host_root_lock(&hv, &res2);
+    if (root == ZERO) {
+        SetIoErr(res2);
+        return DOSFALSE;
+    }
+    root2 = lhh_host_root_lock(&hv2, &res2);
+    if (root2 == ZERO) {
+        lhh_host_unlock(root);
+        SetIoErr(res2);
+        return DOSFALSE;
+    }
+    bstr_from = lhh_make_bstr(lhh_bbuf, rest[0] ? rest : "");
+    bstr_to = lhh_make_bstr(bbuf2, rest2[0] ? rest2 : "");
+    res1 = lhh_dopkt(hv.port, ACTION_RENAME_OBJECT,
+        (LONG)root, (LONG)bstr_from, (LONG)root2, (LONG)bstr_to, 0, &res2);
+    lhh_host_unlock(root);
+    lhh_host_unlock(root2);
     if (!res1) {
         SetIoErr(res2);
     }

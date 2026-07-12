@@ -24,6 +24,7 @@
 #define LHADD_Attrs      (TAG_USER + 2)
 #define LHADD_DateStamp  (TAG_USER + 3)
 #define LHADD_Comment    (TAG_USER + 4)
+#define LHADD_Directory  (TAG_USER + 5)
 #endif
 
 struct LhArchive;

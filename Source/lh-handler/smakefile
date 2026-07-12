@@ -3,13 +3,21 @@
 #
 # root-handler packet loop + host FS passthrough (lh_pkt) + LHA overlay.
 #
+# Logging is off by default.  To enable LH-handler.log packet tracing:
+#   set DEBUGDEF DEF=LHH_DEBUG
+# (or add DEF=LHH_DEBUG beside DEF=AMIGA on each sc line)
+#
 
 CC      = sc
 LD      = slink
 RM      = delete force quiet
 
+# Enable for LH-handler.log (needed to see volume: splice lines).
+DEBUGDEF = DEF=LHH_DEBUG
+# DEBUGDEF =
+
 TARGET  = lh-handler
-OBJS    = lh-handler.o lh_path.o lh_arc.o lh_pkt.o lhh_debug.o
+OBJS    = lh-handler.o lh_path.o lh_arc.o lh_pkt.o lhh_debug.o lh_icon.o lh_drawer_info.o lh_volume.o
 
 all: $(TARGET)
 
@@ -18,25 +26,41 @@ rebuild: clean all
 $(TARGET): $(OBJS)
 	$(LD) FROM $(OBJS) TO $(TARGET) ND NOICONS SMALLDATA SMALLCODE LIB lib:amiga.lib sc:lib/sc.lib BATCH
 
-lh-handler.o: lh-handler.c lh-handler.h lh-handler_rev.h lhh_debug.h
-	$(CC) DEF=AMIGA lh-handler.c OBJNAME=lh-handler.o
+LHAOpen: LHAOpen.o
+	$(LD) FROM LHAOpen.o TO LHAOpen ND NOICONS LIB lib:amiga.lib sc:lib/sc.lib BATCH
+
+lh-handler.o: lh-handler.c lh-handler.h lh-handler_rev.h lhh_debug.h lh_drawer_info.h
+	$(CC) DEF=AMIGA $(DEBUGDEF) lh-handler.c OBJNAME=lh-handler.o
 
 lh_path.o: lh_path.c lh-handler.h lhh_debug.h
-	$(CC) DEF=AMIGA lh_path.c OBJNAME=lh_path.o
+	$(CC) DEF=AMIGA $(DEBUGDEF) lh_path.c OBJNAME=lh_path.o
 
-lh_arc.o: lh_arc.c lh-handler.h lhh_debug.h
-	$(CC) DEF=AMIGA lh_arc.c OBJNAME=lh_arc.o
+lh_arc.o: lh_arc.c lh-handler.h lhh_debug.h lh_drawer_info.h
+	$(CC) DEF=AMIGA $(DEBUGDEF) lh_arc.c OBJNAME=lh_arc.o
 
 lh_pkt.o: lh_pkt.c lh-handler.h lhh_debug.h
-	$(CC) DEF=AMIGA lh_pkt.c OBJNAME=lh_pkt.o
+	$(CC) DEF=AMIGA $(DEBUGDEF) lh_pkt.c OBJNAME=lh_pkt.o
 
 lhh_debug.o: lhh_debug.c lhh_debug.h lh-handler.h
-	$(CC) DEF=AMIGA lhh_debug.c OBJNAME=lhh_debug.o
+	$(CC) DEF=AMIGA $(DEBUGDEF) lhh_debug.c OBJNAME=lhh_debug.o
+
+lh_icon.o: lh_icon.c lh-handler.h lh_drawer_info.h
+	$(CC) DEF=AMIGA $(DEBUGDEF) lh_icon.c OBJNAME=lh_icon.o
+
+lh_drawer_info.o: lh_drawer_info.c lh_drawer_info.h
+	$(CC) DEF=AMIGA lh_drawer_info.c OBJNAME=lh_drawer_info.o
+
+lh_volume.o: lh_volume.c lh-handler.h
+	$(CC) DEF=AMIGA $(DEBUGDEF) lh_volume.c OBJNAME=lh_volume.o
+
+LHAOpen.o: LHAOpen.c
+	$(CC) DEF=AMIGA LHAOpen.c OBJNAME=LHAOpen.o
 
 clean:
 	-$(RM) $(OBJS)
 	-$(RM) $(TARGET)
 	-$(RM) $(TARGET).info
+	-$(RM) LHAOpen.o LHAOpen LHAOpen.info
 
 install:
 	copy $(TARGET) L:$(TARGET)

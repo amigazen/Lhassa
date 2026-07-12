@@ -78,6 +78,10 @@ typedef unsigned long lh_u32;
 #define LH_BUF_DECODE_AUX 4500u
 #define LH_BUF_ENCODE_AUX 40000u
 
+/* Classic LZHUF used by LhEncode / LhDecode (Krekel/Barthel lh.library). */
+unsigned long lh_lzhuf_encode(LhBuffer *buf);
+unsigned long lh_lzhuf_decode(LhBuffer *buf);
+
 /* Huffman tree limits */
 #define LH_MAX_HUFFMAN_CODE 16
 #define LH_MAX_HUFFMAN_LEAVES 512

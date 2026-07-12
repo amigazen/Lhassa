@@ -155,6 +155,204 @@ int lhh_is_parent_name(const char *name)
 }
 
 /*
+ * True when name is one or more '/' only ("/", "//", ...).  Amiga cd uses
+ * these as parent steps; they must not be stripped or treated as entries.
+ */
+int lhh_is_parent_chain(const char *name)
+{
+    LONG i;
+
+    if (name == NULL || name[0] == '\0') {
+        return 0;
+    }
+    for (i = 0; name[i] != '\0'; i++) {
+        if (name[i] != '/') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * True for names ending in ".lha.info" (any case), e.g. Foo.lha.info.
+ * Used to serve the embedded Drawer.info for archive icons.
+ */
+int lhh_is_lha_info_name(const char *name)
+{
+    static const char suf[] = ".lha.info";
+    LONG n;
+    LONG i;
+    char a;
+    char b;
+
+    if (name == NULL) {
+        return 0;
+    }
+    n = lhh_cstr_len(name);
+    if (n < 9) {
+        return 0;
+    }
+    for (i = 0; i < 9; i++) {
+        a = name[n - 9 + i];
+        b = suf[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* name ends with ".info" (any case) -> base without suffix. */
+int lhh_strip_info_suffix(const char *name, STRPTR base, LONG baselen)
+{
+    LONG n;
+    LONG i;
+    char a;
+    char b;
+    static const char suf[] = ".info";
+
+    if (!name || !base || baselen <= 0) {
+        return 0;
+    }
+    n = lhh_cstr_len(name);
+    if (n < 5) {
+        return 0;
+    }
+    for (i = 0; i < 5; i++) {
+        a = name[n - 5 + i];
+        b = suf[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    if (n - 5 >= baselen) {
+        return 0;
+    }
+    for (i = 0; i < n - 5; i++) {
+        base[i] = name[i];
+    }
+    base[n - 5] = '\0';
+    return base[0] ? 1 : 0;
+}
+
+/* True if name is ".info" or ends with ".info" (any case). */
+int lhh_name_ends_info(const char *name)
+{
+    LONG n;
+    LONG i;
+    char a;
+    char b;
+    static const char suf[] = ".info";
+
+    if (name == NULL) {
+        return 0;
+    }
+    if (lhh_cstr_eq_i(name, ".info")) {
+        return 1;
+    }
+    n = lhh_cstr_len(name);
+    if (n < 5) {
+        return 0;
+    }
+    for (i = 0; i < 5; i++) {
+        a = name[n - 5 + i];
+        b = suf[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Leaf or path ends with ".lha" (any case). */
+int lhh_name_ends_lha(const char *name)
+{
+    LONG n;
+    LONG i;
+    char a;
+    char b;
+    static const char suf[] = ".lha";
+
+    if (name == NULL) {
+        return 0;
+    }
+    n = lhh_cstr_len(name);
+    if (n < 4) {
+        return 0;
+    }
+    for (i = 0; i < 4; i++) {
+        a = name[n - 4 + i];
+        b = suf[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (a != b) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/*
+ * True if a multi-component path goes through an archive file before the
+ * last component (e.g. Work/t/foo.lha/bar.info).  Virtual .info placeholders
+ * are only for objects outside archives.
+ */
+int lhh_path_crosses_lha(const char *path)
+{
+    const char *p;
+    char comp[LHH_PATH_LEN];
+    int saw_lha;
+
+    if (path == NULL || path[0] == '\0') {
+        return 0;
+    }
+    if (!lhh_cstr_has(path, '/')) {
+        return 0;
+    }
+    saw_lha = 0;
+    p = path;
+    while (lhh_path_next(&p, comp, LHH_PATH_LEN)) {
+        if (p[0] == '\0') {
+            /* Last component - ignore whether it is .lha */
+            break;
+        }
+        if (lhh_name_ends_lha(comp)) {
+            saw_lha = 1;
+            break;
+        }
+    }
+    return saw_lha;
+}
+
+/* Disk.info / Volume.info / bare "Disk" for LHA: volume icon. */
+int lhh_is_disk_info_name(const char *name)
+{
+    if (name == NULL || name[0] == '\0') {
+        return 0;
+    }
+    if (lhh_cstr_eq_i(name, "Disk")) {
+        return 1;
+    }
+    if (lhh_cstr_eq_i(name, "Disk.info")) {
+        return 1;
+    }
+    if (lhh_cstr_eq_i(name, "Volume.info")) {
+        return 1;
+    }
+    return 0;
+}
+
+/*
  * Take the next LHA: path component from *path (or "/" for parent).
  * Returns 0 when nothing left.
  */
@@ -249,7 +447,7 @@ void lhh_real_join(STRPTR out, LONG outlen, const char *base, const char *name)
 
 /*
  * Append one component to a virtual path under LHA: (no LHA: prefix).
- * "" + AmigaZen -> AmigaZen ; AmigaZen + lhasa -> AmigaZen/lhasa
+ * "" + VolumeName -> VolumeName ; VolumeName + lhasa -> VolumeName/lhasa
  * Virtual paths never contain ':'.
  */
 void lhh_virt_append_name(STRPTR out, LONG outlen, const char *base,
@@ -300,7 +498,7 @@ int lhh_virt_parent_path(const char *virt, STRPTR out, LONG outlen)
 
 /*
  * Map a real Amiga path to the virtual form under LHA: (no prefix).
- * AmigaZen: -> AmigaZen ; AmigaZen:lhasa/file.lha -> AmigaZen/lhasa/file.lha
+ * VolumeName: -> VolumeName ; VolumeName:lhasa/file.lha -> VolumeName/lhasa/file.lha
  */
 int lhh_real_to_virt_path(GD gd, const char *real, STRPTR virt, LONG outlen)
 {
@@ -375,6 +573,45 @@ void lhh_examine_fib_name(struct FileInfoBlock *fib, const char *virt)
     fib->fib_FileName[n + 1] = '\0';
 }
 
+/*
+ * Convert one NUL-terminated field in a FIB to a BSTR (length at [0]).
+ * Used when a dos-style C string from Lh* must go out on a handler packet.
+ */
+static void lhh_field_cstr_to_bstr(UBYTE *field, LONG fieldmax)
+{
+    static char tmp[108];
+    LONG n;
+    LONG i;
+
+    if (field == NULL || fieldmax < 2) {
+        return;
+    }
+    n = 0;
+    while (field[n] != '\0' && n < fieldmax - 2 && n < (LONG)sizeof(tmp) - 1) {
+        tmp[n] = (char)field[n];
+        n++;
+    }
+    if (n > 255) {
+        n = 255;
+    }
+    field[0] = (UBYTE)n;
+    for (i = 0; i < n; i++) {
+        field[i + 1] = (UBYTE)tmp[i];
+    }
+    field[n + 1] = '\0';
+}
+
+void lhh_fib_cstr_to_bstr(struct FileInfoBlock *fib)
+{
+    if (fib == NULL) {
+        return;
+    }
+    lhh_field_cstr_to_bstr((UBYTE *)fib->fib_FileName,
+        (LONG)sizeof(fib->fib_FileName));
+    lhh_field_cstr_to_bstr((UBYTE *)fib->fib_Comment,
+        (LONG)sizeof(fib->fib_Comment));
+}
+
 int lhh_cstr_has(const char *s, char ch)
 {
     LONG i;
@@ -391,8 +628,29 @@ int lhh_cstr_has(const char *s, char ch)
 }
 
 /*
+ * RKRM: handlers must not call LockDosList (can deadlock).  AttemptLockDosList
+ * returns a DosList pointer on success, or 0/1 on failure (V39 quirk).
+ * Spin briefly; we cannot Delay/WaitPort while holding a client packet.
+ */
+struct DosList *lhh_attempt_lock_doslist(GD gd, ULONG flags)
+{
+    struct DosList *dl;
+    LONG i;
+
+    for (i = 0; i < 128; i++) {
+        dl = AttemptLockDosList(flags);
+        if (dl != NULL && (ULONG)dl > 1UL) {
+            return dl;
+        }
+    }
+    return NULL;
+}
+
+/*
  * Look up vol (no trailing ':') in the dos list case-insensitively and
  * copy the canonical name to out.  Covers devices, volumes, and assigns.
+ * If the DosList cannot be locked, copy vol as-is so DeviceProc can still
+ * resolve (volume names are case-insensitive).
  */
 int lhh_canon_volume(GD gd, const char *vol, STRPTR out, LONG outlen)
 {
@@ -403,8 +661,6 @@ int lhh_canon_volume(GD gd, const char *vol, STRPTR out, LONG outlen)
     LONG i;
     LONG vlen;
     ULONG flags;
-
-    (void)gd;
 
     if (!vol || !vol[0] || !out || outlen <= 1) {
         return 0;
@@ -419,9 +675,17 @@ int lhh_canon_volume(GD gd, const char *vol, STRPTR out, LONG outlen)
     }
 
     flags = LDF_DEVICES | LDF_VOLUMES | LDF_ASSIGNS | LDF_READ;
-    dl = LockDosList(flags);
+    dl = lhh_attempt_lock_doslist(gd, flags);
     if (dl == NULL) {
-        return 0;
+        /* DosList busy - pass name through unchanged. */
+        if (vlen >= outlen) {
+            vlen = outlen - 1;
+        }
+        for (i = 0; i < vlen; i++) {
+            out[i] = vol[i];
+        }
+        out[vlen] = '\0';
+        return 1;
     }
     e = dl;
     while ((e = NextDosEntry(e, flags)) != NULL) {
@@ -446,11 +710,11 @@ int lhh_canon_volume(GD gd, const char *vol, STRPTR out, LONG outlen)
                 out[i] = bname[i + 1];
             }
             out[n] = '\0';
-            UnLockDosList(LDF_DEVICES | LDF_VOLUMES | LDF_ASSIGNS);
+            UnLockDosList(flags);
             return 1;
         }
     }
-    UnLockDosList(LDF_DEVICES | LDF_VOLUMES | LDF_ASSIGNS);
+    UnLockDosList(flags);
     return 0;
 }
 
@@ -458,8 +722,8 @@ int lhh_canon_volume(GD gd, const char *vol, STRPTR out, LONG outlen)
  * Virtual path under LHA: first component is a volume/assign/device name
  * (case-insensitive).  LHA:ram/foo/bar.lha -> RAM:foo/bar.lha
  *
- * Colons are not allowed in virtual paths.  LHA:AmigaZen: is invalid;
- * LHA:AmigaZen maps to AmigaZen:.
+ * Colons are not allowed in virtual paths.  LHA:VolumeName: is invalid;
+ * LHA:VolumeName maps to VolumeName:.
  */
 int lhh_virt_to_real(GD gd, const char *virt, STRPTR real, LONG reallen)
 {
@@ -505,7 +769,7 @@ int lhh_virt_to_real(GD gd, const char *virt, STRPTR real, LONG reallen)
         return 0;
     }
 
-    /* LHA:AmigaZen -> AmigaZen: */
+    /* LHA:VolumeName -> VolumeName: */
     j = 0;
     for (i = 0; canon[i] && j < reallen - 1; i++, j++) {
         real[j] = canon[i];
@@ -584,6 +848,13 @@ int lhh_is_volume_root_name(GD gd, const char *name)
     if (name == NULL || name[0] == '\0') {
         return 1;
     }
+    /*
+     * Workbench locates BSTR ":" on the handler
+     * port (volume root).  Same meaning as empty name under LHA:.
+     */
+    if (name[0] == ':' && name[1] == '\0') {
+        return 1;
+    }
     i = 0;
     while (name[i] == '/') {
         i++;
@@ -604,9 +875,45 @@ int lhh_is_volume_root_name(GD gd, const char *name)
             return 0;
         }
     }
-    /* "LHA" or "LHA:" only ? not "LHA:foo" or "LHA/foo". */
+    /* "LHA" or "LHA:" only - not "LHA:foo" or "LHA/foo". */
     return name[i + n] == '\0' ||
         (name[i + n] == ':' && name[i + n + 1] == '\0');
+}
+
+/*
+ * Shell/MatchFirst sometimes pass "lha:path" (device + colon) as the locate
+ * name instead of "path".  Strip our own prefix so nested locks work.
+ */
+int lhh_strip_self_prefix(GD gd, char *name)
+{
+    STRPTR bname;
+    LONG n;
+    LONG i;
+    LONG j;
+
+    if (!gd || !gd->gd_DosList || !name || !name[0]) {
+        return 0;
+    }
+    bname = (STRPTR)BADDR(gd->gd_DosList->dol_Name);
+    if (!bname) {
+        return 0;
+    }
+    n = (LONG)((UBYTE *)bname)[0];
+    for (i = 0; i < n; i++) {
+        if (name[i] == '\0' || !lhh_ch_eq_i(name[i], bname[i + 1])) {
+            return 0;
+        }
+    }
+    if (name[n] != ':') {
+        return 0;
+    }
+    /* Shift remainder left over "LHA:" */
+    j = 0;
+    for (i = n + 1; name[i] != '\0'; i++, j++) {
+        name[j] = name[i];
+    }
+    name[j] = '\0';
+    return 1;
 }
 
 void lhh_file_part(const char *path, STRPTR out, LONG outlen)

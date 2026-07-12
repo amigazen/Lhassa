@@ -177,7 +177,9 @@ lt_disk_examine(STRPTR path, LONG *prot_out, STRPTR comment_out, LONG comment_ma
         *prot_out = fib->fib_Protection;
     }
     if (comment_out && comment_max > 0) {
-        strncpy((char *)comment_out, fib->fib_Comment, (size_t)comment_max - 1);
+        /* dos.library Examine(): NUL-terminated C string (RKRM 7.1). */
+        strncpy((char *)comment_out, (char *)fib->fib_Comment,
+            (size_t)comment_max - 1);
         comment_out[comment_max - 1] = '\0';
     }
     FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));

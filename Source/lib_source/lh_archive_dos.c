@@ -26,6 +26,9 @@
 #ifndef ST_FILE
 #define ST_FILE (-3L)
 #endif
+#ifndef ST_USERDIR
+#define ST_USERDIR (2L)
+#endif
 
 #include "/include/lh.h"
 #include "lh/lhbase.h"
@@ -159,11 +162,14 @@ struct LhArchive {
 
 struct LhLock {
     struct LhArchive *archive;
-    LONG entry_index;
+    LONG entry_index;   /* -1 = archive root, -2 = synthetic dir, >=0 = entry */
     LONG iterate_index;
     char name[512];
     int exall_aborted;
 };
+
+#define LH_LOCK_ROOT_DIR   (-1L)
+#define LH_LOCK_SYNTH_DIR  (-2L)
 
 struct LhFileHandle {
     struct LhLock *lock;
@@ -299,6 +305,11 @@ static void lh_ref_to_fib(const struct lh_arc_entry_ref *ref, struct FileInfoBlo
         return;
     }
     memset(fib, 0, sizeof(*fib));
+    /*
+     * LhExamine/LhExNext match dos.library Examine(): NUL-terminated C
+     * strings.  Handlers filling ACTION_EXAMINE_* packets must use BSTRs
+     * instead (RKRM 14.3.1); lh-handler converts before replying.
+     */
     strncpy(fib->fib_FileName, ref->name, sizeof(fib->fib_FileName) - 1);
     fib->fib_FileName[sizeof(fib->fib_FileName) - 1] = '\0';
     fib->fib_Size = (LONG)ref->orig;
@@ -306,10 +317,12 @@ static void lh_ref_to_fib(const struct lh_arc_entry_ref *ref, struct FileInfoBlo
     /* Amiga protection bits are stored directly as the LHA attribute byte. */
     fib->fib_Protection = (LONG)ref->attrs;
     if (ref->is_directory) {
-        /* dos.doc: fib_DirEntryType positive for directories. */
-        fib->fib_DirEntryType = 2;
+        /* RKRM: prefer ST_USERDIR; any positive value is a directory. */
+        fib->fib_DirEntryType = ST_USERDIR;
+        fib->fib_EntryType = ST_USERDIR;
     } else {
         fib->fib_DirEntryType = (LONG)ST_FILE;
+        fib->fib_EntryType = (LONG)ST_FILE;
     }
     lh_dt_to_datestamp(&ref->dt, &fib->fib_Date);
     fib->fib_Comment[0] = '\0';
@@ -340,6 +353,194 @@ static LONG lh_find_entry_index(struct LhArchive *arc, const char *name)
         }
     }
     return -1;
+}
+
+/*
+ * Case-insensitive length of a shared path prefix (AmigaFS style).
+ * Returns -1 if strings differ before either ends at a boundary.
+ */
+static LONG lh_path_prefix_len(const char *parent, const char *name)
+{
+    LONG i;
+
+    if (!parent || !name) {
+        return -1;
+    }
+    if (parent[0] == '\0') {
+        return 0;
+    }
+    for (i = 0; parent[i] != '\0'; i++) {
+        char a;
+        char b;
+
+        a = parent[i];
+        b = name[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (char)(b - 'A' + 'a');
+        }
+        if (a != b) {
+            return -1;
+        }
+    }
+    if (name[i] != '\0' && name[i] != '/') {
+        return -1;
+    }
+    return i;
+}
+
+/* True if any catalog entry lives under parent/ (parent may be ""). */
+static int lh_has_children_under(struct LhArchive *arc, const char *parent)
+{
+    LONG i;
+    LONG plen;
+
+    if (!arc || !parent) {
+        return 0;
+    }
+    plen = (LONG)strlen(parent);
+    for (i = 0; i < arc->catalog_count; i++) {
+        const char *n;
+
+        n = arc->catalog[i].name;
+        if (!n) {
+            continue;
+        }
+        if (plen == 0) {
+            return 1;
+        }
+        if (lh_path_prefix_len(parent, n) == plen && n[plen] == '/') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * First path component of name relative to parent into leaf[].
+ * Returns 1 and sets *is_dir if this entry implies a directory child
+ * (deeper path or explicit directory).  *exact_idx is catalog index when
+ * the child name equals parent/leaf exactly, else -1.
+ */
+static int lh_child_leaf_from_entry(const char *parent, const char *name,
+    char *leaf, LONG leafmax, int *is_dir, LONG entry_idx, LONG *exact_idx)
+{
+    LONG plen;
+    LONG i;
+    LONG j;
+    const char *rest;
+
+    if (!name || !leaf || leafmax <= 1 || !is_dir || !exact_idx) {
+        return 0;
+    }
+    *exact_idx = -1;
+    *is_dir = 0;
+    plen = parent && parent[0] ? (LONG)strlen(parent) : 0;
+    if (plen > 0) {
+        if (lh_path_prefix_len(parent, name) != plen || name[plen] != '/') {
+            return 0;
+        }
+        rest = name + plen + 1;
+    } else {
+        rest = name;
+    }
+    if (rest[0] == '\0') {
+        return 0;
+    }
+    j = 0;
+    for (i = 0; rest[i] != '\0' && rest[i] != '/' && j < leafmax - 1; i++) {
+        leaf[j++] = rest[i];
+    }
+    leaf[j] = '\0';
+    if (leaf[0] == '\0') {
+        return 0;
+    }
+    if (rest[i] == '/') {
+        *is_dir = 1;
+    }
+    if (rest[i] == '\0') {
+        *exact_idx = entry_idx;
+    }
+    return 1;
+}
+
+/* True if leaf was already emitted from an earlier catalog entry under parent. */
+static int lh_leaf_seen_before(struct LhArchive *arc, const char *parent,
+    const char *leaf, LONG before_idx)
+{
+    LONG i;
+    char prev[108];
+    int is_dir;
+    LONG exact;
+
+    for (i = 0; i < before_idx; i++) {
+        if (!lh_child_leaf_from_entry(parent, arc->catalog[i].name,
+                prev, (LONG)sizeof(prev), &is_dir, i, &exact)) {
+            continue;
+        }
+        if (lh_name_match(leaf, prev)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Advance iterate_index to the next unique immediate child under parent.
+ * Fills fib with leaf name; uses catalog metadata when an exact entry exists.
+ */
+static int lh_fill_next_child(struct LhLock *lock, struct FileInfoBlock *fib)
+{
+    struct LhArchive *arc;
+    const char *parent;
+    LONG i;
+    char leaf[108];
+    int is_dir;
+    LONG exact;
+    struct lh_arc_entry_ref synth;
+
+    if (!lock || !fib || !lock->archive) {
+        return 0;
+    }
+    arc = lock->archive;
+    if (lock->entry_index == LH_LOCK_ROOT_DIR) {
+        parent = "";
+    } else {
+        parent = lock->name;
+    }
+    for (i = lock->iterate_index + 1; i < arc->catalog_count; i++) {
+        if (!lh_child_leaf_from_entry(parent, arc->catalog[i].name,
+                leaf, (LONG)sizeof(leaf), &is_dir, i, &exact)) {
+            continue;
+        }
+        if (lh_leaf_seen_before(arc, parent, leaf, i)) {
+            continue;
+        }
+        lock->iterate_index = i;
+        if (exact >= 0) {
+            if (arc->catalog[exact].is_directory) {
+                is_dir = 1;
+            }
+            lh_ref_to_fib(&arc->catalog[exact], fib);
+            strncpy(fib->fib_FileName, leaf, sizeof(fib->fib_FileName) - 1);
+            fib->fib_FileName[sizeof(fib->fib_FileName) - 1] = '\0';
+            if (is_dir) {
+                fib->fib_DirEntryType = ST_USERDIR;
+                fib->fib_EntryType = ST_USERDIR;
+            }
+            return 1;
+        }
+        /* Implied directory (only deeper paths exist). */
+        memset(&synth, 0, sizeof(synth));
+        synth.name = leaf;
+        synth.is_directory = 1;
+        synth.orig = 0;
+        lh_ref_to_fib(&synth, fib);
+        return 1;
+    }
+    return 0;
 }
 
 static int lh_read_entry_at_index(struct LhArchive *arc, LONG index,
@@ -534,6 +735,7 @@ LONG lh_arc_close(struct LhArchive *archive)
 BPTR lh_arc_lock(struct LhArchive *archive, STRPTR name)
 {
     struct LhLock *lock;
+    LONG idx;
 
     if (!archive) {
         lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
@@ -547,13 +749,21 @@ BPTR lh_arc_lock(struct LhArchive *archive, STRPTR name)
     lock->archive = archive;
     lock->iterate_index = -1;
     if (!name || !name[0]) {
-        lock->entry_index = -1;
+        lock->entry_index = LH_LOCK_ROOT_DIR;
         lock->name[0] = '\0';
     } else {
-        lock->entry_index = lh_find_entry_index(archive, (const char *)name);
+        idx = lh_find_entry_index(archive, (const char *)name);
         strncpy(lock->name, (const char *)name, sizeof(lock->name) - 1);
         lock->name[sizeof(lock->name) - 1] = '\0';
-        if (lock->entry_index < 0) {
+        if (idx >= 0) {
+            lock->entry_index = idx;
+        } else if (lh_has_children_under(archive, (const char *)name)) {
+            /*
+             * Implied directory: path exists only as a prefix of other
+             * entries (common when LHA omits explicit directory headers).
+             */
+            lock->entry_index = LH_LOCK_SYNTH_DIR;
+        } else {
             free(lock);
             lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
             return (BPTR)NULL;
@@ -578,6 +788,9 @@ LONG lh_arc_examine(BPTR lock_bptr, struct FileInfoBlock *fib)
 {
     struct LhLock *lock;
     struct LhArchive *arc;
+    struct lh_arc_entry_ref synth;
+    const char *leaf;
+    LONG i;
 
     if (!lock_bptr || !fib) {
         return DOSFALSE;
@@ -587,18 +800,41 @@ LONG lh_arc_examine(BPTR lock_bptr, struct FileInfoBlock *fib)
     if (!arc) {
         return DOSFALSE;
     }
-    if (lock->entry_index < 0) {
-        if (arc->catalog_count <= 0) {
-            return DOSFALSE;
-        }
-        lock->iterate_index = 0;
-        lh_ref_to_fib(&arc->catalog[0], fib);
+    if (lock->entry_index == LH_LOCK_ROOT_DIR) {
+        /*
+         * Archive root as a real directory: Examine fills the dir itself
+         * (not the first catalog entry).  LhExNext then yields immediate
+         * children with leaf names (test/test1/file -> "test").
+         */
+        memset(fib, 0, sizeof(*fib));
+        fib->fib_DirEntryType = ST_USERDIR;
+        fib->fib_EntryType = ST_USERDIR;
+        fib->fib_FileName[0] = '\0';
+        fib->fib_NumBlocks = 1;
+        lock->iterate_index = -1;
         return DOSTRUE;
     }
-    if (lock->entry_index >= arc->catalog_count) {
+    if (lock->entry_index == LH_LOCK_SYNTH_DIR) {
+        leaf = lock->name;
+        for (i = 0; lock->name[i] != '\0'; i++) {
+            if (lock->name[i] == '/' || lock->name[i] == ':') {
+                leaf = &lock->name[i + 1];
+            }
+        }
+        memset(&synth, 0, sizeof(synth));
+        synth.name = (char *)leaf;
+        synth.is_directory = 1;
+        lh_ref_to_fib(&synth, fib);
+        lock->iterate_index = -1;
+        return DOSTRUE;
+    }
+    if (lock->entry_index < 0 || lock->entry_index >= arc->catalog_count) {
         return DOSFALSE;
     }
     lh_ref_to_fib(&arc->catalog[lock->entry_index], fib);
+    if (arc->catalog[lock->entry_index].is_directory) {
+        lock->iterate_index = -1;
+    }
     return DOSTRUE;
 }
 
@@ -606,23 +842,34 @@ LONG lh_arc_exnext(BPTR lock_bptr, struct FileInfoBlock *fib)
 {
     struct LhLock *lock;
     struct LhArchive *arc;
-    LONG idx;
 
     if (!lock_bptr || !fib) {
         return DOSFALSE;
     }
     lock = (struct LhLock *)lock_bptr;
     arc = lock->archive;
-    if (!arc || lock->entry_index >= 0) {
+    if (!arc) {
         return DOSFALSE;
     }
-    idx = lock->iterate_index + 1;
-    if (idx >= arc->catalog_count) {
+
+    /* Directory lock (root, synth, or explicit): immediate leaf children. */
+    if (lock->entry_index == LH_LOCK_ROOT_DIR
+        || lock->entry_index == LH_LOCK_SYNTH_DIR) {
+        if (lh_fill_next_child(lock, fib)) {
+            return DOSTRUE;
+        }
         return DOSFALSE;
     }
-    lock->iterate_index = idx;
-    lh_ref_to_fib(&arc->catalog[idx], fib);
-    return DOSTRUE;
+    if (lock->entry_index >= 0
+        && lock->entry_index < arc->catalog_count
+        && arc->catalog[lock->entry_index].is_directory) {
+        if (lh_fill_next_child(lock, fib)) {
+            return DOSTRUE;
+        }
+        return DOSFALSE;
+    }
+
+    return DOSFALSE;
 }
 
 static ULONG lh_exall_hdrsize(LONG type)
@@ -714,6 +961,7 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
     struct ExAllData *ead;
     struct ExAllData *prev;
     struct lh_arc_entry_ref *ref;
+    struct lh_arc_entry_ref synth;
     UBYTE *bp;
     UBYTE *bufend;
     UBYTE *strp;
@@ -721,7 +969,13 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
     ULONG reclen;
     LONG idx;
     LONG entries;
+    LONG exact;
+    int is_dir;
+    const char *parent;
+    const char *comment;
+    char leaf[108];
     struct DateStamp ds;
+    int is_dirlock;
 
     if (!lock_bptr || !buffer || buf_size <= 0 || !control) {
         lh_arc_seterr(ERROR_NO_FREE_STORE);
@@ -733,7 +987,26 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
     }
     hdrsize = lh_exall_hdrsize(type);
     lock = (struct LhLock *)lock_bptr;
-    if (lock->entry_index >= 0) {
+    arc = lock->archive;
+    if (!arc) {
+        lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
+        return DOSFALSE;
+    }
+
+    /*
+     * Nested virtual dirs: ExAll lists immediate children (leaf names),
+     * same as LhExNext.  Flat catalog names are not exposed here.
+     */
+    is_dirlock = 0;
+    if (lock->entry_index == LH_LOCK_ROOT_DIR
+        || lock->entry_index == LH_LOCK_SYNTH_DIR) {
+        is_dirlock = 1;
+    } else if (lock->entry_index >= 0
+        && lock->entry_index < arc->catalog_count
+        && arc->catalog[lock->entry_index].is_directory) {
+        is_dirlock = 1;
+    }
+    if (!is_dirlock) {
         lh_arc_seterr(ERROR_OBJECT_WRONG_TYPE);
         return DOSFALSE;
     }
@@ -743,22 +1016,51 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
         control->eac_Entries = 0;
         return DOSFALSE;
     }
-    arc = lock->archive;
-    if (!arc) {
-        lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
-        return DOSFALSE;
+
+    if (lock->entry_index == LH_LOCK_ROOT_DIR) {
+        parent = "";
+    } else {
+        parent = lock->name;
     }
+
     bp = (UBYTE *)buffer;
     bufend = bp + (ULONG)buf_size;
     prev = NULL;
     entries = 0;
+    /* LastKey = next catalog index to scan (0 on first call). */
     idx = (LONG)control->eac_LastKey;
 
     while (idx < arc->catalog_count) {
-        ref = &arc->catalog[idx];
-        reclen = lh_exall_reclen(type, ref->name, ref->comment);
+        if (!lh_child_leaf_from_entry(parent, arc->catalog[idx].name,
+                leaf, (LONG)sizeof(leaf), &is_dir, idx, &exact)) {
+            idx++;
+            continue;
+        }
+        if (lh_leaf_seen_before(arc, parent, leaf, idx)) {
+            idx++;
+            continue;
+        }
+
+        comment = NULL;
+        ref = NULL;
+        if (exact >= 0) {
+            ref = &arc->catalog[exact];
+            if (ref->is_directory) {
+                is_dir = 1;
+            }
+            comment = ref->comment;
+        } else {
+            memset(&synth, 0, sizeof(synth));
+            synth.name = leaf;
+            synth.is_directory = 1;
+            synth.orig = 0;
+            ref = &synth;
+            is_dir = 1;
+        }
+
+        reclen = lh_exall_reclen(type, leaf, comment);
         if (reclen == 0UL || bp + reclen > bufend) {
-            if (entries == 0 && idx < arc->catalog_count) {
+            if (entries == 0) {
                 lh_arc_seterr(ERROR_LINE_TOO_LONG);
                 control->eac_Entries = 0;
                 control->eac_LastKey = (ULONG)idx;
@@ -769,10 +1071,10 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
         ead = (struct ExAllData *)bp;
         memset(ead, 0, hdrsize);
         strp = lh_exall_strptr(bp, hdrsize);
-        strcpy((char *)strp, ref->name);
+        strcpy((char *)strp, leaf);
         ead->ed_Name = (UBYTE *)strp;
         if (type >= ED_TYPE) {
-            ead->ed_Type = ref->is_directory ? ST_USERDIR : ST_FILE;
+            ead->ed_Type = is_dir ? ST_USERDIR : ST_FILE;
         }
         if (type >= ED_SIZE) {
             ead->ed_Size = ref->orig;
@@ -790,13 +1092,13 @@ LONG lh_arc_exall(BPTR lock_bptr, STRPTR buffer, LONG buf_size, LONG type,
             UBYTE *cp;
             ULONG nlen;
 
-            nlen = (ULONG)strlen(ref->name) + 1UL;
+            nlen = (ULONG)strlen(leaf) + 1UL;
             cp = strp + nlen;
             if (((ULONG)cp) & 1UL) {
                 cp++;
             }
-            if (ref->comment && ref->comment[0]) {
-                strcpy((char *)cp, ref->comment);
+            if (comment && comment[0]) {
+                strcpy((char *)cp, comment);
             } else {
                 cp[0] = '\0';
             }
@@ -880,7 +1182,7 @@ LONG lh_arc_name_from_lock(BPTR lock_bptr, STRPTR buffer, LONG len)
         buffer[0] = '\0';
         return 0;
     }
-    if (lock->entry_index < 0) {
+    if (lock->entry_index == LH_LOCK_ROOT_DIR) {
         strncpy(buffer, arc->path, (size_t)len - 1);
     } else {
         strncpy(buffer, lock->name, (size_t)len - 1);
@@ -1294,10 +1596,11 @@ LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG le
  * Request LH5 explicitly with LHADD_Method / LhAddEntryTags.
  *
  * Tags (libraries/lhlib.h):
- *   LHADD_Method     - lh_level (0=store, 5=lh5, ...)
- *   LHADD_Attrs      - Amiga protection bits → LHA attribute byte
+ *   LHADD_Method     - lh_level (0=store, 5=lh5, 11=dir)
+ *   LHADD_Attrs      - Amiga protection bits -> LHA attribute byte
  *   LHADD_DateStamp  - struct DateStamp *
- *   LHADD_Comment    - STRPTR filenote → extension 0x41
+ *   LHADD_Comment    - STRPTR filenote -> extension 0x41
+ *   LHADD_Directory  - nonzero -> -lhd- directory (ignores data)
  */
 LONG lh_arc_add_entry_taglist(
     struct LhArchive *archive,
@@ -1313,6 +1616,7 @@ LONG lh_arc_add_entry_taglist(
     const char *comment;
     struct TagItem *t;
     struct DateStamp *ds;
+    int as_dir;
 
     if (!archive || !archive->writer || !name) {
         lh_arc_seterr(ERROR_INVALID_COMPONENT_NAME);
@@ -1327,6 +1631,7 @@ LONG lh_arc_add_entry_taglist(
     level = LH_LEVEL_STORE;
     attrs = LH_ATTR_DEFAULT;
     comment = NULL;
+    as_dir = 0;
     lh_datetime_now(&dt);
 
     if (tags) {
@@ -1345,8 +1650,17 @@ LONG lh_arc_add_entry_taglist(
                 }
             } else if (t->ti_Tag == LHADD_Comment) {
                 comment = (const char *)t->ti_Data;
+            } else if (t->ti_Tag == LHADD_Directory) {
+                if (t->ti_Data) {
+                    as_dir = 1;
+                }
             }
         }
+    }
+    if (as_dir) {
+        level = LH_LEVEL_LHD;
+        data = NULL;
+        len = 0;
     }
 
     st = lh_writer_add(archive->writer, (const char *)name, comment,

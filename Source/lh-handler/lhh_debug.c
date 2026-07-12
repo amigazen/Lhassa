@@ -5,8 +5,12 @@
  * pr_MsgPort, which is also our packet port).  A small child process owns
  * the log file and uses normal Open/Write on its own pr_MsgPort.
  *
- * Parent sends log lines as messages; child writes them.  Lines are queued
- * in a ring during packet handling and flushed on pkt_leave.
+ * Parent sends log lines as messages to a *private* MsgPort on the child.
+ * The child's pr_MsgPort is reserved for dos Open/Write/Close replies only
+ * (mixing custom msgs there causes AN_AsyncPkt / "Unexpected packet received").
+ *
+ * Startup must Wait() (not busy-spin): the handler is Priority 5, so a
+ * lower-priority child never runs while we spin, leaving an empty log.
  */
 
 #include <exec/types.h>
@@ -24,6 +28,8 @@
 #include "lhh_debug.h"
 #include "lh-handler.h"
 
+#ifdef LHH_DEBUG
+
 #ifdef __SASC
 #undef SysBase
 #undef DOSBase
@@ -40,6 +46,7 @@
 #define LHH_LOCK_REAL     1
 #define LHH_LOCK_ARCHIVE  2
 #define LHH_LOCK_ENTRY    3
+#define LHH_LOCK_VINFO    4
 
 #define LHH_DBG_BUFSIZE   512
 #define LHH_LOG_RING_SIZE 8192
@@ -58,44 +65,73 @@ struct LhhLogMsg {
 
 #define LHH_LOG_CMD_QUIT  (-1)
 
+/*
+ * Shared handshake block in public memory so parent/child do not depend on
+ * A4 for the ready signal (SMALLDATA).  Port pointer still lives here.
+ */
+struct LhhLogShared {
+    struct Process *parent;
+    BYTE parentsig;
+    struct MsgPort *childport;
+    LONG status; /* 1=file ok, 0=no file but port up, -1=failed */
+    char path[128];
+};
+
 struct LhhPktName {
     LONG type;
     const char *name;
 };
 
 static const struct LhhPktName lhh_pkt_names[] = {
-    { 1,   "LOCATE_OBJECT" },
-    { 2,   "FREE_LOCK" },
-    { 3,   "FINDINPUT" },
-    { 4,   "FINDOUTPUT" },
-    { 5,   "FINDUPDATE" },
-    { 6,   "END" },
-    { 7,   "READ" },
-    { 8,   "WRITE" },
-    { 9,   "SEEK" },
-    { 16,  "DIE" },
-    { 17,  "COPY_DIR" },
-    { 18,  "PARENT" },
-    { 19,  "EXAMINE_OBJECT" },
-    { 20,  "EXAMINE_NEXT" },
-    { 21,  "INFO" },
-    { 22,  "DISK_INFO" },
-    { 23,  "RENAME" },
-    { 24,  "DELETE_OBJECT" },
-    { 25,  "SETCOMMENT" },
-    { 26,  "PROTECT" },
-    { 27,  "CREATE_DIR" },
-    { 28,  "UPDATE" },
-    { 29,  "DATE" },
-    { 30,  "SAME_LOCK" },
-    { 31,  "CHANGE_MODE" },
-    { 32,  "CURRENT_VOLUME" },
-    { 33,  "IS_FILESYSTEM" },
-    { 34,  "EXAMINE_FH" },
-    { 1025, "COPY_DIR_FH" },
+    /* Numbers from RKRM dos.library packet docs */
+    { 5,    "DIE" },
+    { 7,    "CURRENT_VOLUME" },
+    { 8,    "LOCATE_OBJECT" },
+    { 9,    "RENAME_DISK" },
+    { 15,   "FREE_LOCK" },
+    { 16,   "DELETE_OBJECT" },
+    { 17,   "RENAME_OBJECT" },
+    { 18,   "MORE_CACHE" },
+    { 19,   "COPY_DIR" },
+    { 21,   "SET_PROTECT" },
+    { 22,   "CREATE_DIR" },
+    { 23,   "EXAMINE_OBJECT" },
+    { 24,   "EXAMINE_NEXT" },
+    { 25,   "DISK_INFO" },
+    { 26,   "INFO" },
+    { 27,   "FLUSH" },
+    { 28,   "SET_COMMENT" },
+    { 29,   "PARENT" },
+    { 31,   "INHIBIT" },
+    { 34,   "SET_DATE" },
+    { 40,   "SAME_LOCK" },
+    { 82,   "READ" },
+    { 87,   "WRITE" },
+    { 1004, "FINDUPDATE" },
+    { 1005, "FINDINPUT" },
+    { 1006, "FINDOUTPUT" },
+    { 1007, "END" },
+    { 1008, "SEEK" },
+    { 1020, "FORMAT" },
+    { 1021, "MAKE_LINK" },
+    { 1022, "SET_FILE_SIZE" },
+    { 1023, "WRITE_PROTECT" },
+    { 1024, "READ_LINK" },
+    { 1026, "FH_FROM_LOCK" },
+    { 1027, "IS_FILESYSTEM" },
+    { 1028, "CHANGE_MODE" },
+    { 1030, "COPY_DIR_FH" },
+    { 1031, "PARENT_FH" },
     { 1033, "EXAMINE_ALL" },
+    { 1034, "EXAMINE_FH" },
     { 1035, "EXAMINE_ALL_END" },
-    { 0,   NULL }
+    { 1036, "SET_OWNER" },
+    { 2008, "LOCK_RECORD" },
+    { 2009, "FREE_RECORD" },
+    { 4097, "ADD_NOTIFY" },
+    { 4098, "REMOVE_NOTIFY" },
+    { 4200, "SERIALIZE_DISK" },
+    { 0,    NULL }
 };
 
 static char lhh_log_ring[LHH_LOG_RING_SIZE];
@@ -104,10 +140,8 @@ static LONG lhh_pkt_depth;
 static int lhh_log_lazy_done;
 static char lhh_log_pathbuf[128];
 
-/* Set by child when its MsgPort is ready; cleared on quit. */
-static volatile struct MsgPort *lhh_log_child_port;
+static struct LhhLogShared *lhh_log_shared;
 static struct Process *lhh_log_child;
-static struct Process *lhh_log_parent;
 static int lhh_log_ok;
 
 static void lhh_log_ring_append(const char *text);
@@ -163,8 +197,10 @@ static void lhh_putch(char c, char **p)
 #endif
 
 /*
- * Log child: normal dos Open/Write on this process's own pr_MsgPort.
- * Uses AbsExecBase - never LhhGD (handler small-data / A4).
+ * Log child: normal dos Open/Write on pr_MsgPort; log lines arrive on a
+ * *private* MsgPort.  Never PutMsg log traffic to pr_MsgPort - dos.library
+ * WaitPkt for Write/Open would see it and Alert AN_AsyncPkt
+ * ("Unexpected packet received").
  */
 #ifdef __SASC
 static void __saveds lhh_log_child_entry(void)
@@ -174,8 +210,8 @@ static void lhh_log_child_entry(void)
 {
     struct Library *AbsSysBase;
     struct DosLibrary *AbsDOSBase;
-    struct Process *pr;
-    struct MsgPort *port;
+    struct MsgPort *logport;
+    struct LhhLogShared *shared;
     BPTR fh;
     struct LhhLogMsg *lm;
     int running;
@@ -191,15 +227,42 @@ static void lhh_log_child_entry(void)
 
     AbsSysBase = *(struct Library **)4L;
     AbsDOSBase = NULL;
-    pr = (struct Process *)FindTask(NULL);
-    port = &pr->pr_MsgPort;
+    logport = NULL;
     fh = ZERO;
     running = 1;
     used = NULL;
+    shared = lhh_log_shared;
 
     AbsDOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 37);
     if (AbsDOSBase == NULL) {
-        lhh_log_child_port = NULL;
+        if (shared != NULL) {
+            shared->status = -1;
+            shared->childport = NULL;
+            if (shared->parent != NULL && shared->parentsig >= 0) {
+                Signal((struct Task *)shared->parent,
+                    1UL << shared->parentsig);
+            }
+        }
+#ifdef __SASC
+#undef SysBase
+#undef DOSBase
+#define SysBase     gd->gd_SysBase
+#define DOSBase     gd->gd_DOSBase
+#endif
+        return;
+    }
+
+    logport = CreateMsgPort();
+    if (logport == NULL) {
+        if (shared != NULL) {
+            shared->status = -1;
+            shared->childport = NULL;
+            if (shared->parent != NULL && shared->parentsig >= 0) {
+                Signal((struct Task *)shared->parent,
+                    1UL << shared->parentsig);
+            }
+        }
+        CloseLibrary((struct Library *)AbsDOSBase);
 #ifdef __SASC
 #undef SysBase
 #undef DOSBase
@@ -218,19 +281,28 @@ static void lhh_log_child_entry(void)
             used = LHH_LOG_FALLBACK;
         }
     }
-    if (used != NULL) {
-        for (j = 0; used[j] != '\0' && j < (LONG)sizeof(lhh_log_pathbuf) - 1;
-            j++) {
-            lhh_log_pathbuf[j] = used[j];
+
+    if (shared != NULL) {
+        if (used != NULL) {
+            for (j = 0; used[j] != '\0' && j < (LONG)sizeof(shared->path) - 1;
+                j++) {
+                shared->path[j] = used[j];
+            }
+            shared->path[j] = '\0';
+            shared->status = 1;
+        } else {
+            shared->path[0] = '\0';
+            shared->status = 0;
         }
-        lhh_log_pathbuf[j] = '\0';
+        shared->childport = logport;
+        if (shared->parent != NULL && shared->parentsig >= 0) {
+            Signal((struct Task *)shared->parent, 1UL << shared->parentsig);
+        }
     }
 
-    lhh_log_child_port = port;
-
     while (running) {
-        WaitPort(port);
-        while ((lm = (struct LhhLogMsg *)GetMsg(port)) != NULL) {
+        WaitPort(logport);
+        while ((lm = (struct LhhLogMsg *)GetMsg(logport)) != NULL) {
             if (lm->len == LHH_LOG_CMD_QUIT) {
                 running = 0;
             } else if (fh != ZERO && lm->len > 0) {
@@ -243,7 +315,10 @@ static void lhh_log_child_entry(void)
     if (fh != ZERO) {
         Close(fh);
     }
-    lhh_log_child_port = NULL;
+    if (shared != NULL) {
+        shared->childport = NULL;
+    }
+    DeleteMsgPort(logport);
     CloseLibrary((struct Library *)AbsDOSBase);
 
 #ifdef __SASC
@@ -256,18 +331,36 @@ static void lhh_log_child_entry(void)
 
 static int lhh_log_start_child(void)
 {
-    struct TagItem tags[5];
+    struct TagItem tags[6];
+    struct LhhLogShared *shared;
     LONG i;
+    BYTE sig;
 
-    if (lhh_log_child_port != NULL) {
+    if (lhh_log_ok && lhh_log_shared != NULL
+        && lhh_log_shared->childport != NULL) {
         return 1;
     }
     if (LhhGD == NULL || DOSBase == NULL) {
         return 0;
     }
 
-    lhh_log_parent = (struct Process *)FindTask(NULL);
-    lhh_log_child_port = NULL;
+    sig = AllocSignal(-1);
+    if (sig < 0) {
+        return 0;
+    }
+
+    shared = (struct LhhLogShared *)AllocMem(sizeof(struct LhhLogShared),
+        MEMF_PUBLIC | MEMF_CLEAR);
+    if (shared == NULL) {
+        FreeSignal(sig);
+        return 0;
+    }
+    shared->parent = (struct Process *)FindTask(NULL);
+    shared->parentsig = sig;
+    shared->childport = NULL;
+    shared->status = -1;
+    shared->path[0] = '\0';
+    lhh_log_shared = shared;
     lhh_log_pathbuf[0] = '\0';
 
     i = 0;
@@ -280,26 +373,54 @@ static int lhh_log_start_child(void)
     tags[i].ti_Tag = NP_Name;
     tags[i].ti_Data = (ULONG)"lh-log";
     i++;
+    /* Above handler Priority 5 so Open runs while parent Wait()s. */
     tags[i].ti_Tag = NP_Priority;
-    tags[i].ti_Data = (ULONG)0;
+    tags[i].ti_Data = (ULONG)6;
     i++;
     tags[i].ti_Tag = TAG_DONE;
     tags[i].ti_Data = 0;
 
+    SetSignal(0, 1UL << sig);
     lhh_log_child = CreateNewProc(tags);
     if (lhh_log_child == NULL) {
+        FreeMem(shared, sizeof(struct LhhLogShared));
+        lhh_log_shared = NULL;
+        FreeSignal(sig);
         return 0;
     }
 
-    /* Busy-wait - Delay() on the handler mixes with pr_MsgPort packets. */
-    for (i = 0; i < 1000000 && lhh_log_child_port == NULL; i++) {
-        /* spin */
-    }
-    if (lhh_log_child_port == NULL) {
+    /* Yield until child Signals - busy-spin starves lower-priority tasks. */
+    Wait(1UL << sig);
+
+    FreeSignal(sig);
+    shared->parentsig = -1;
+
+    if (shared->childport == NULL) {
+        FreeMem(shared, sizeof(struct LhhLogShared));
+        lhh_log_shared = NULL;
+        lhh_log_child = NULL;
         return 0;
     }
 
+    if (shared->path[0] != '\0') {
+        for (i = 0; shared->path[i] != '\0'
+            && i < (LONG)sizeof(lhh_log_pathbuf) - 1; i++) {
+            lhh_log_pathbuf[i] = shared->path[i];
+        }
+        lhh_log_pathbuf[i] = '\0';
+    }
+
+    /* Port is up: accept logging even if only RAM: or primary Open failed. */
     lhh_log_ok = 1;
+    if (shared->status < 0) {
+        lhh_log_ok = 0;
+        return 0;
+    }
+    if (shared->status == 0) {
+        /* No file - still useless for the user. */
+        lhh_log_ok = 0;
+        return 0;
+    }
     return 1;
 }
 
@@ -310,7 +431,10 @@ static void lhh_log_send(const char *text, LONG len)
     LONG i;
     LONG n;
 
-    dest = (struct MsgPort *)lhh_log_child_port;
+    if (lhh_log_shared == NULL) {
+        return;
+    }
+    dest = lhh_log_shared->childport;
     if (dest == NULL || text == NULL || len <= 0) {
         return;
     }
@@ -376,7 +500,10 @@ void lhh_log_close(void)
     if (lhh_log_ok) {
         lhh_log_send("lh-handler: log closed\r\n", 25);
     }
-    dest = (struct MsgPort *)lhh_log_child_port;
+    dest = NULL;
+    if (lhh_log_shared != NULL) {
+        dest = lhh_log_shared->childport;
+    }
     if (dest != NULL) {
         lm = (struct LhhLogMsg *)AllocMem(sizeof(struct LhhLogMsg),
             MEMF_PUBLIC | MEMF_CLEAR);
@@ -386,9 +513,14 @@ void lhh_log_close(void)
             lm->len = LHH_LOG_CMD_QUIT;
             PutMsg(dest, &lm->msg);
         }
-        for (i = 0; i < 200000 && lhh_log_child_port != NULL; i++) {
-            /* spin until child clears port */
+        for (i = 0; i < 200000 && lhh_log_shared != NULL
+            && lhh_log_shared->childport != NULL; i++) {
+            /* child clears childport on exit; brief spin is OK after Quit */
         }
+    }
+    if (lhh_log_shared != NULL) {
+        FreeMem(lhh_log_shared, sizeof(struct LhhLogShared));
+        lhh_log_shared = NULL;
     }
     lhh_log_ok = 0;
     lhh_log_child = NULL;
@@ -397,7 +529,8 @@ void lhh_log_close(void)
 
 int lhh_log_active(void)
 {
-    return (lhh_log_ok && lhh_log_child_port != NULL) ? 1 : 0;
+    return (lhh_log_ok && lhh_log_shared != NULL
+        && lhh_log_shared->childport != NULL) ? 1 : 0;
 }
 
 void lhh_db_pkt_enter(void)
@@ -559,7 +692,11 @@ const char *lhh_lock_type_name(ULONG type)
         return "ARCHIVE";
     case LHH_LOCK_ENTRY:
         return "ENTRY";
+    case LHH_LOCK_VINFO:
+        return "VINFO";
     default:
         return "?";
     }
 }
+
+#endif /* LHH_DEBUG */

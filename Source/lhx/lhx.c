@@ -203,15 +203,22 @@ int main(int argc, char *argv[])
     LONG with_paths;
     LONG i;
 
-    (void)argc;
-    (void)argv;
-
     /* dos.library and utility.library before ReadArgs or any other API use. */
     if (!lhx_open_libs()) {
         if (DOSBase) {
             lhx_print_error((STRPTR)"cannot open utility.library", 0);
         }
         return RETURN_FAIL;
+    }
+
+    /*
+     * Workbench: argc == 0 and argv is WBStartup *.  Default-tool launch
+     * for a .lha project remaps the file to LHA: volume, assuming Lh-handler is mounted and calls OpenWorkbenchObject().
+     */
+    if (argc == 0) {
+        rc = lhx_wb_startup((struct WBStartup *)argv);
+        lhx_set_rc(rc);
+        return (int)rc;
     }
 
     for (i = 0; i < LHX_NARGS; i++) {

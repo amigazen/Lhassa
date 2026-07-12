@@ -12,13 +12,18 @@
  *
  * Amiga path rules (not POSIX): ':' is volume root; each locate carries one
  * name component; '/' alone means parent.  Virtual paths under LHA: never
- * contain ':': LHA:AmigaZen maps to AmigaZen:, LHA:AmigaZen: is invalid.
- * LHA:AmigaZen/lhasa/file.lha/entry maps to AmigaZen:lhasa/file.lha + entry.
+ * contain ':': LHA:VolumeName maps to VolumeName:, LHA:VolumeName: is invalid.
+ * LHA:VolumeName/lhasa/file.lha/entry maps to VolumeName:lhasa/file.lha + entry.
  */
 
 #include "lh-handler.h"
+#include "lh_drawer_info.h"
 
 #include <string.h>
+
+#ifndef DLT_VOLUME
+#define DLT_VOLUME 2
+#endif
 
 struct Library *LhBase = NULL;
 GD LhhGD = NULL;
@@ -82,6 +87,9 @@ static BOOL openres(GD gd, LONG *err)
     gd->gd_Pool = NULL;
     gd->gd_UsageCnt = 0;
     gd->gd_LockCnt = 0;
+    gd->gd_Volume = NULL;
+    gd->gd_VolumeAdded = 0;
+    gd->gd_VolPending = 0;
     lhh_arc_init(gd);
 
     if (SysBase->lib_Version >= 39) {
@@ -111,6 +119,9 @@ static BOOL openres(GD gd, LONG *err)
 
 static void closeres(GD gd)
 {
+    lhh_icon_cleanup(gd);
+    lhh_volume_remove(gd);
+    lhh_host_pkt_cleanup();
     if (LhBase != NULL) {
         CloseLibrary(LhBase);
         LhBase = NULL;
@@ -141,41 +152,10 @@ static BOOL Die(GD gd)
     return TRUE;
 }
 
-/* Skip our own LHA: entry in the root volume list. */
+/* Skip our own LHA: device and published "Lha" volume in the root list. */
 static int IsSelfDosEntry(GD gd, STRPTR bname)
 {
-    STRPTR self;
-    LONG n;
-    LONG i;
-
-    if (gd->gd_DosList == NULL || bname == NULL) {
-        return 0;
-    }
-    self = (STRPTR)BADDR(gd->gd_DosList->dol_Name);
-    if (self == NULL) {
-        return 0;
-    }
-    n = (LONG)((UBYTE *)self)[0];
-    if (n != (LONG)((UBYTE *)bname)[0]) {
-        return 0;
-    }
-    for (i = 0; i < n; i++) {
-        char a;
-        char b;
-
-        a = self[i + 1];
-        b = bname[i + 1];
-        if (a >= 'A' && a <= 'Z') {
-            a = (char)(a + ('a' - 'A'));
-        }
-        if (b >= 'A' && b <= 'Z') {
-            b = (char)(b + ('a' - 'A'));
-        }
-        if (a != b) {
-            return 0;
-        }
-    }
-    return 1;
+    return lhh_is_self_volume_entry(gd, bname);
 }
 
 static struct LhHLock *pkt_lock(GD gd, BPTR bptr)
@@ -208,8 +188,13 @@ static void examine_root_fib(struct FileInfoBlock *fib)
     fib->fib_Comment[0] = 0;
 }
 
-static void examine_archive_fib(struct LhHLock *lock, struct FileInfoBlock *fib)
+static void examine_archive_fib(GD gd, struct LhHLock *lock,
+    struct FileInfoBlock *fib)
 {
+    BPTR rl;
+    struct FileInfoBlock *tmp;
+
+    memset(fib, 0, sizeof(*fib));
     fib->fib_DirEntryType = ST_USERDIR;
     fib->fib_EntryType = ST_USERDIR;
     fib->fib_DiskKey = 0;
@@ -217,7 +202,139 @@ static void examine_archive_fib(struct LhHLock *lock, struct FileInfoBlock *fib)
     fib->fib_Size = 0;
     fib->fib_NumBlocks = 0;
     fib->fib_Comment[0] = 0;
-    lhh_examine_fib_name(fib, lock->virt_path);
+    /* Stamp the .lha-as-drawer with the host archive file's date. */
+    if (lock != NULL && lock->real_path[0] != '\0') {
+        rl = lhh_host_lock((STRPTR)lock->real_path, SHARED_LOCK);
+        if (rl != ZERO) {
+            tmp = (struct FileInfoBlock *)AllocMem(
+                sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+            if (tmp != NULL) {
+                if (lhh_host_examine(rl, tmp)) {
+                    fib->fib_Date = tmp->fib_Date;
+                }
+                FreeMem(tmp, sizeof(struct FileInfoBlock));
+            }
+            lhh_host_unlock(rl);
+        }
+    }
+    lhh_examine_fib_name(fib, lock != NULL ? lock->virt_path : "");
+    (void)gd;
+}
+
+static void examine_vinfo_fib(GD gd, struct LhHLock *lock,
+    struct FileInfoBlock *fib)
+{
+    ULONG size;
+    static char basevirt[LHH_PATH_LEN];
+    static char basereal[LHH_PATH_LEN];
+    BPTR rl;
+    struct FileInfoBlock *tmp;
+
+    memset(fib, 0, sizeof(*fib));
+    fib->fib_DirEntryType = ST_FILE;
+    fib->fib_EntryType = ST_FILE;
+    fib->fib_DiskKey = 0;
+    fib->fib_Protection = 0;
+    /* Volume Disk.info size must match the WBDISK blob we Open(). */
+    if (lock != NULL && lock->vinfo_kind == LHH_VINFO_DISK) {
+        size = lhh_icon_len(LHH_VINFO_DISK);
+    } else {
+        size = lhh_icon_len(LHH_VINFO_DRAWER);
+    }
+    fib->fib_Size = (LONG)size;
+    fib->fib_NumBlocks = (LONG)((size + 511UL) / 512UL);
+    fib->fib_Comment[0] = 0;
+    /*
+     * Match the companion object date (drawer/.lha) so icons don't show
+     * 1-Jan-1978.  Disk.info keeps "now" if nothing else is available.
+     */
+    DateStamp(&fib->fib_Date);
+    if (lock != NULL && lock->virt_path[0] != '\0'
+        && lhh_strip_info_suffix(lock->virt_path, basevirt, LHH_PATH_LEN)
+        && lhh_virt_to_real(gd, basevirt, basereal, LHH_PATH_LEN)
+        && basereal[0] != '\0') {
+        rl = lhh_host_lock((STRPTR)basereal, SHARED_LOCK);
+        if (rl != ZERO) {
+            tmp = (struct FileInfoBlock *)AllocMem(
+                sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+            if (tmp != NULL) {
+                if (lhh_host_examine(rl, tmp)) {
+                    fib->fib_Date = tmp->fib_Date;
+                }
+                FreeMem(tmp, sizeof(struct FileInfoBlock));
+            }
+            lhh_host_unlock(rl);
+        }
+    }
+    lhh_examine_fib_name(fib, lock != NULL ? lock->virt_path : "Drawer.info");
+}
+
+/*
+ * Emit a virtual name.info as ST_FILE (BSTR name) for AddChild in WB.
+ * keep_key must be the previous real entry's fib_DiskKey so the next
+ * ExNext can continue the host/archive cursor (not restart from key 1).
+ */
+static void fill_pending_info_fib(struct FileInfoBlock *fib, const char *leaf,
+    ULONG size, LONG keep_key, const struct DateStamp *date)
+{
+    LONG n;
+    LONG i;
+
+    memset(fib, 0, sizeof(*fib));
+    fib->fib_DirEntryType = ST_FILE;
+    fib->fib_EntryType = ST_FILE;
+    fib->fib_Size = (LONG)size;
+    fib->fib_NumBlocks = (LONG)((size + 511UL) / 512UL);
+    if (date != NULL) {
+        fib->fib_Date = *date;
+    }
+    n = lhh_cstr_len(leaf);
+    if (n > 106) {
+        n = 106;
+    }
+    fib->fib_FileName[0] = (UBYTE)n;
+    for (i = 0; i < n; i++) {
+        fib->fib_FileName[i + 1] = leaf[i];
+    }
+    fib->fib_FileName[n + 1] = '\0';
+    fib->fib_Comment[0] = 0;
+    fib->fib_DiskKey = keep_key;
+}
+
+/* Queue leaf+".info"; save DiskKey so the inserted .info does not lose ExNext. */
+static void queue_pending_info(GD gd, struct LhHLock *lock, const char *leaf,
+    LONG diskkey, const struct DateStamp *date)
+{
+    LONG n;
+    LONG i;
+    static char base[108];
+
+    if (lock == NULL || leaf == NULL || leaf[0] == '\0') {
+        return;
+    }
+    if (lhh_strip_info_suffix(leaf, base, (LONG)sizeof(base))) {
+        return;
+    }
+    n = lhh_cstr_len(leaf);
+    if (n + 5 >= (LONG)sizeof(lock->pending_info)) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        lock->pending_info[i] = leaf[i];
+    }
+    lock->pending_info[n] = '.';
+    lock->pending_info[n + 1] = 'i';
+    lock->pending_info[n + 2] = 'n';
+    lock->pending_info[n + 3] = 'f';
+    lock->pending_info[n + 4] = 'o';
+    lock->pending_info[n + 5] = '\0';
+    lock->pending_diskkey = diskkey;
+    if (date != NULL) {
+        lock->pending_date = *date;
+    } else {
+        /* DateStamp uses DOSBase macro (gd->gd_DOSBase). */
+        DateStamp(&lock->pending_date);
+    }
 }
 
 static ULONG lhh_main(void)
@@ -248,11 +365,20 @@ static ULONG lhh_main(void)
         return RETURN_FAIL;
     }
 
+    /*
+     * Cache default icons while pr_MsgPort is idle (startup packet already
+     * taken, device not yet replied).  Must not fail the mount if this
+     * misses - LHA: still has to come up.
+     */
+    if (!lhh_icon_init(gd)) {
+        DB("icon.library defaults unavailable\n");
+    }
+
     gd->gd_DosList = (struct DosList *)BADDR(Pkt->dp_Arg3);
     gd->gd_DosList->dol_Task = gd->gd_Port;
     ReplyDosPacket1(gd, Pkt, DOSTRUE);
 
-    /* Host I/O uses DosList + private reply port, not GetDeviceProc. */
+    /* Host I/O uses DeviceProc + private reply port, not GetDeviceProc. */
     lhh_log_open(LHH_LOG_PATH);
     if (lhh_log_active()) {
         DB1("handler ready log=%s\n", lhh_log_path_used());
@@ -261,13 +387,23 @@ static ULONG lhh_main(void)
         DB("handler ready log=FAILED");
     }
 
+    /*
+     * Concept A/B: publish DLT_VOLUME "Lha" so WB gets an ActiveDisk.
+     * fl_Volume / Info / CURRENT_VOLUME use that node, not the device.
+     */
+    lhh_volume_init(gd);
+
     Done = FALSE;
     while (Done == FALSE) {
+        if (gd->gd_VolPending) {
+            lhh_volume_try_add(gd);
+        }
         Pkt = WaitDosPacket(gd);
         Pkt->dp_Res1 = DOSFALSE;
         Pkt->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
 
         lhh_db_pkt_enter();
+        DB2("pkt %s (%ld)\n", lhh_pkt_name(Pkt->dp_Type), Pkt->dp_Type);
         switch (Pkt->dp_Type) {
         case ACTION_DIE:
             if ((Done = Die(gd)) == TRUE) {
@@ -311,6 +447,9 @@ static ULONG lhh_main(void)
                     && lhh_cstr_eq_i(a->virt_path, b->virt_path)
                     && lhh_cstr_eq_i(a->entry, b->entry)) {
                     ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
+                } else if (a->type == LHH_LOCK_VINFO
+                    && lhh_cstr_eq_i(a->virt_path, b->virt_path)) {
+                    ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
                 } else {
                     ReplyDosPacket2(gd, Pkt, DOSFALSE, 0);
                 }
@@ -335,8 +474,11 @@ static ULONG lhh_main(void)
                     nameb = (STRPTR)BADDR(Pkt->dp_Arg2);
                 }
                 lhh_bstr_to_cstr(nameb, locname, LHH_PATH_LEN);
-                /* Trailing '/' is common (dir foo/); strip for locate. */
-                {
+                /*
+                 * Trailing '/' is common (dir foo/); strip for locate.
+                 * Do not touch "/" / "//" parent chains (Amiga cd /).
+                 */
+                if (!lhh_is_parent_chain(locname)) {
                     LONG ln;
 
                     ln = lhh_cstr_len(locname);
@@ -347,8 +489,18 @@ static ULONG lhh_main(void)
                 }
 
                 /*
-                 * Virtual LHA: paths never contain ':'.  dos may pass
-                 * "AmigaZen:" when the user typed LHA:AmigaZen: - reject.
+                 * dos/Shell may pass "lha:volumename/..." (device included).
+                 * Strip our prefix and resolve from volume root.
+                 */
+                if (lhh_strip_self_prefix(gd, locname)) {
+                    parent = NULL;
+                    DB1("locate stripped self prefix -> %s\n", locname);
+                }
+
+                /*
+                 * After stripping, virtual paths must not contain ':'.
+                 * "VolumeName:" (trailing colon on a volume component) is
+                 * invalid under LHA:; "VolumeName" maps to VolumeName:.
                  */
                 if (lhh_cstr_has(locname, ':')
                     && !lhh_is_volume_root_name(gd, locname)) {
@@ -364,11 +516,8 @@ static ULONG lhh_main(void)
                  */
                 err = ERROR_NO_FREE_STORE;
                 lock = NULL;
-                if (Pkt->dp_Arg1 == ZERO
-                    && lhh_is_volume_root_name(gd, locname)) {
-                    lock = lhh_lock_alloc(gd, LHH_LOCK_ROOT, NULL, NULL,
-                        ZERO, NULL, NULL, mode, &err);
-                } else if ((parent == NULL || parent->type == LHH_LOCK_ROOT)
+                if ((Pkt->dp_Arg1 == ZERO || parent == NULL
+                        || parent->type == LHH_LOCK_ROOT)
                     && lhh_is_volume_root_name(gd, locname)) {
                     lock = lhh_lock_alloc(gd, LHH_LOCK_ROOT, NULL, NULL,
                         ZERO, NULL, NULL, mode, &err);
@@ -434,20 +583,59 @@ static ULONG lhh_main(void)
             }
             break;
 
+        case ACTION_COPY_DIR_FH:
+            {
+                struct LhHHandle *hh;
+                struct LhHLock *dup;
+
+                /*
+                 * DupLock-from-FH.  Required when copy unpacks nested
+                 * drawers via Open+ExamineFH; ACTION_NOT_KNOWN here leaves
+                 * dos waiting and triggers "unexpected packet received".
+                 */
+                hh = (struct LhHHandle *)Pkt->dp_Arg1;
+                err = ERROR_OBJECT_NOT_FOUND;
+                if (hh == NULL || hh->lock == NULL) {
+                    ReplyDosPacket2(gd, Pkt, ZERO, err);
+                    break;
+                }
+                dup = lhh_lock_dup(gd, hh->lock, &err);
+                if (dup != NULL) {
+                    ReplyDosPacket1(gd, Pkt, MKBADDR(dup));
+                } else {
+                    ReplyDosPacket2(gd, Pkt, ZERO, err);
+                }
+            }
+            break;
+
         case ACTION_PARENT:
             {
                 struct LhHLock *lock;
                 struct LhHLock *parent;
 
                 lock = pkt_lock(gd, (BPTR)Pkt->dp_Arg1);
+                /*
+                 * RKRM: parent of the volume root (or ZERO lock) is not an
+                 * error - Res1=0, Res2=0.  Returning OBJECT_NOT_FOUND here
+                 * makes list/NameFromLock report failure after a fine scan.
+                 */
+                if (lock == NULL || lock->type == LHH_LOCK_ROOT) {
+                    ReplyDosPacket2(gd, Pkt, ZERO, 0);
+                    break;
+                }
                 err = ERROR_NO_FREE_STORE;
                 parent = lhh_lock_parent(gd, lock, &err);
                 if (parent != NULL) {
+                    DB2("parent ok from %s virt=%s\n",
+                        lhh_lock_type_name(lock->type), lock->virt_path);
+                    DB2("parent ok to %s virt=%s\n",
+                        lhh_lock_type_name(parent->type),
+                        parent->virt_path);
                     ReplyDosPacket1(gd, Pkt, MKBADDR(parent));
                 } else {
-                    if (lock == NULL || lock->type == LHH_LOCK_ROOT) {
-                        err = ERROR_OBJECT_NOT_FOUND;
-                    }
+                    DB2("parent fail %s virt=%s\n",
+                        lhh_lock_type_name(lock->type), lock->virt_path);
+                    DB1("parent fail err=%ld\n", err);
                     ReplyDosPacket2(gd, Pkt, DOSFALSE, err);
                 }
             }
@@ -490,12 +678,19 @@ static ULONG lhh_main(void)
                     break;
                 }
                 if (lock->type == LHH_LOCK_ARCHIVE) {
-                    examine_archive_fib(lock, fib);
+                    examine_archive_fib(gd, lock, fib);
+                    ReplyDosPacket1(gd, Pkt, DOSTRUE);
+                    break;
+                }
+                if (lock->type == LHH_LOCK_VINFO) {
+                    examine_vinfo_fib(gd, lock, fib);
                     ReplyDosPacket1(gd, Pkt, DOSTRUE);
                     break;
                 }
                 ok = LhExamine(lock->lh_lock, fib);
                 if (ok) {
+                    /* Lh*: C strings; packet reply needs BSTRs (RKRM 14.3.1). */
+                    lhh_fib_cstr_to_bstr(fib);
                     lhh_examine_fib_name(fib, lock->virt_path);
                     ReplyDosPacket1(gd, Pkt, DOSTRUE);
                 } else {
@@ -520,51 +715,54 @@ static ULONG lhh_main(void)
                     break;
                 }
 
-                /* Root: volumes/assigns (no trailing ':', skip self). */
+                /* Root: mounted filesystem volumes only (no assigns, no .info). */
                 if (lock == NULL || lock->type == LHH_LOCK_ROOT) {
-                    dl = LockDosList(LDF_VOLUMES | LDF_ASSIGNS | LDF_READ);
-                    if (dl != NULL) {
-                        if (fib->fib_DiskKey != 0) {
-                            struct DosList *sdl;
+                    ULONG dflags;
 
-                            sdl = (struct DosList *)fib->fib_DiskKey;
-                            while ((dl = NextDosEntry(dl,
-                                    LDF_VOLUMES | LDF_ASSIGNS | LDF_READ))
-                                != NULL) {
-                                if (dl == sdl) {
-                                    dl = NextDosEntry(dl,
-                                        LDF_VOLUMES | LDF_ASSIGNS | LDF_READ);
-                                    break;
-                                }
-                            }
-                        } else {
-                            dl = NextDosEntry(dl,
-                                LDF_VOLUMES | LDF_ASSIGNS | LDF_READ);
-                        }
-                        while (dl != NULL) {
-                            str = (STRPTR)BADDR(dl->dol_Name);
-                            if (str != NULL && !IsSelfDosEntry(gd, str)) {
-                                LONG n;
+                    dflags = LDF_VOLUMES | LDF_READ;
+                    dl = lhh_attempt_lock_doslist(gd, dflags);
+                    if (dl == NULL) {
+                        /* Busy - do not pretend the volume list is empty. */
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_OBJECT_IN_USE);
+                        break;
+                    }
+                    if (fib->fib_DiskKey != 0) {
+                        struct DosList *sdl;
 
-                                /* Bare volume name under LHA: - no trailing ':' */
-                                n = (LONG)((UBYTE *)str)[0];
-                                if (n > 106) {
-                                    n = 106;
-                                }
-                                fib->fib_FileName[0] = (UBYTE)n;
-                                strncpy(&fib->fib_FileName[1], &str[1],
-                                    (size_t)n);
-                                fib->fib_FileName[n + 1] = '\0';
-                                fib->fib_DiskKey = (LONG)dl;
-                                fib->fib_DirEntryType = ST_USERDIR;
-                                fib->fib_EntryType = ST_USERDIR;
+                        sdl = (struct DosList *)fib->fib_DiskKey;
+                        while ((dl = NextDosEntry(dl, dflags)) != NULL) {
+                            if (dl == sdl) {
+                                dl = NextDosEntry(dl, dflags);
                                 break;
                             }
-                            dl = NextDosEntry(dl,
-                                LDF_VOLUMES | LDF_ASSIGNS | LDF_READ);
                         }
+                    } else {
+                        dl = NextDosEntry(dl, dflags);
                     }
-                    UnLockDosList(LDF_VOLUMES | LDF_ASSIGNS);
+                    while (dl != NULL) {
+                        str = (STRPTR)BADDR(dl->dol_Name);
+                        if (str != NULL && !IsSelfDosEntry(gd, str)
+                            && dl->dol_Type == DLT_VOLUME
+                            && dl->dol_Task != NULL) {
+                            LONG n;
+
+                            /* Bare volume name under LHA: - no trailing ':' */
+                            n = (LONG)((UBYTE *)str)[0];
+                            if (n > 106) {
+                                n = 106;
+                            }
+                            fib->fib_FileName[0] = (UBYTE)n;
+                            strncpy(&fib->fib_FileName[1], &str[1],
+                                (size_t)n);
+                            fib->fib_FileName[n + 1] = '\0';
+                            fib->fib_DiskKey = (LONG)dl;
+                            fib->fib_DirEntryType = ST_USERDIR;
+                            fib->fib_EntryType = ST_USERDIR;
+                            break;
+                        }
+                        dl = NextDosEntry(dl, dflags);
+                    }
+                    UnLockDosList(dflags);
                     if (dl == NULL) {
                         ReplyDosPacket2(gd, Pkt, DOSFALSE,
                             ERROR_NO_MORE_ENTRIES);
@@ -575,37 +773,89 @@ static ULONG lhh_main(void)
                 }
 
                 if (lock->type == LHH_LOCK_REAL) {
+                    /*
+                     * Kludge: after each drawer/.lha host entry, emit a
+                     * virtual name.info so Workbench finds icons.
+                     */
+                    if (lock->pending_info[0] != '\0') {
+                        fill_pending_info_fib(fib, lock->pending_info,
+                            lhh_icon_len(LHH_VINFO_DRAWER),
+                            lock->pending_diskkey, &lock->pending_date);
+                        lock->pending_info[0] = '\0';
+                        ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
+                        break;
+                    }
                     ok = lhh_host_exnext(lock->real_lock, fib);
                     if (ok) {
+                        static char leaf[108];
+                        LONG n;
+                        LONG i;
+
+                        n = (LONG)((UBYTE)fib->fib_FileName[0]);
+                        if (n > 0 && n < (LONG)sizeof(leaf)) {
+                            for (i = 0; i < n; i++) {
+                                leaf[i] = fib->fib_FileName[i + 1];
+                            }
+                            leaf[n] = '\0';
+                            if (fib->fib_DirEntryType < 0
+                                && lhh_name_ends_lha(leaf)) {
+                                fib->fib_DirEntryType = ST_USERDIR;
+                                fib->fib_EntryType = ST_USERDIR;
+                                fib->fib_Size = 0;
+                                queue_pending_info(gd, lock, leaf,
+                                    fib->fib_DiskKey, &fib->fib_Date);
+                            } else if (fib->fib_DirEntryType > 0) {
+                                queue_pending_info(gd, lock, leaf,
+                                    fib->fib_DiskKey, &fib->fib_Date);
+                            }
+                        }
                         ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
                     } else {
-                        ReplyDosPacket2(gd, Pkt, DOSFALSE, IoErr());
+                        err = IoErr();
+                        if (err == 0 || err == ERROR_OBJECT_NOT_FOUND) {
+                            err = ERROR_NO_MORE_ENTRIES;
+                        }
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE, err);
                     }
                     break;
                 }
 
-                if (lock->type != LHH_LOCK_ARCHIVE) {
-                    ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
-                    break;
-                }
-                if (fib->fib_DiskKey == 0) {
-                    ok = LhExamine(lock->lh_lock, fib);
-                    if (!ok) {
-                        ReplyDosPacket2(gd, Pkt, DOSFALSE,
-                            ERROR_NO_MORE_ENTRIES);
+                /*
+                 * ARCHIVE/ENTRY: LhExNext children, then a virtual leaf.info
+                 * so Workbench shows iconless files (Show All / GetWBObject)
+                 * the same way host drawers get drawer/.lha.info placeholders.
+                 * Real *.info catalog entries are listed normally (no VINFO).
+                 */
+                if (lock->type == LHH_LOCK_ARCHIVE
+                    || lock->type == LHH_LOCK_ENTRY) {
+                    static char leaf[108];
+
+                    if (lock->pending_info[0] != '\0') {
+                        fill_pending_info_fib(fib, lock->pending_info,
+                            lhh_icon_len(LHH_VINFO_DRAWER),
+                            lock->pending_diskkey, &lock->pending_date);
+                        lock->pending_info[0] = '\0';
+                        ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
                         break;
                     }
-                    fib->fib_DiskKey = 1;
-                    ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
+                    ok = LhExNext(lock->lh_lock, fib);
+                    if (ok) {
+                        lhh_cstr_copy(leaf, fib->fib_FileName,
+                            (LONG)sizeof(leaf));
+                        lhh_fib_cstr_to_bstr(fib);
+                        fib->fib_DiskKey = 1;
+                        if (!lhh_name_ends_info(leaf)) {
+                            queue_pending_info(gd, lock, leaf, fib->fib_DiskKey,
+                                &fib->fib_Date);
+                        }
+                        ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
+                    } else {
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE,
+                            ERROR_NO_MORE_ENTRIES);
+                    }
                     break;
                 }
-                ok = LhExNext(lock->lh_lock, fib);
-                if (ok) {
-                    fib->fib_DiskKey = 1;
-                    ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
-                } else {
-                    ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_NO_MORE_ENTRIES);
-                }
+                ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
             }
             break;
 
@@ -630,7 +880,7 @@ static ULONG lhh_main(void)
                     STRPTR str;
                     LONG len;
                     LONG elen;
-                    int locked;
+                    ULONG dflags;
 
                     ed = (struct ExAllData *)Pkt->dp_Arg2;
                     size = (ULONG)Pkt->dp_Arg3;
@@ -640,82 +890,84 @@ static ULONG lhh_main(void)
                     }
                     sdl = NULL;
                     last = NULL;
-                    locked = 0;
-                    if (ec != NULL && type > 0 && type < sizeof(sizes)
-                        && (ldl = LockDosList(LDF_VOLUMES | LDF_ASSIGNS
-                            | LDF_READ)) != NULL) {
-                        locked = 1;
-                        if (ec->eac_LastKey != 0) {
-                            sdl = (struct DosList *)ec->eac_LastKey;
-                            while ((dl = NextDosEntry(ldl,
-                                    LDF_VOLUMES | LDF_ASSIGNS | LDF_READ))
-                                != NULL) {
-                                ldl = dl;
-                                if (dl == sdl) {
-                                    sdl = NULL;
-                                    break;
-                                }
-                            }
-                            ec->eac_LastKey = 0;
-                        }
-                        if (sdl == NULL && ldl != NULL) {
-                            while ((dl = NextDosEntry(ldl,
-                                    LDF_VOLUMES | LDF_ASSIGNS | LDF_READ))
-                                != NULL) {
-                                str = (STRPTR)BADDR(dl->dol_Name);
-                                if (str == NULL || IsSelfDosEntry(gd, str)) {
-                                    ldl = dl;
-                                    continue;
-                                }
-                                elen = (LONG)sizes[type];
-                                /* +1 for NUL; bare name, no trailing ':' */
-                                len = (LONG)(((str[0] + 1) + 3) & ~(3));
-                                elen += len;
-                                if (size > (ULONG)elen) {
-                                    size -= (ULONG)elen;
-                                    switch (type) {
-                                    case ED_OWNER:
-                                        ed->ed_OwnerUID = 0;
-                                        ed->ed_OwnerGID = 0;
-                                    case ED_COMMENT:
-                                        ed->ed_Comment = NULL;
-                                    case ED_DATE:
-                                        ed->ed_Days = 0;
-                                        ed->ed_Mins = 0;
-                                        ed->ed_Ticks = 0;
-                                    case ED_PROTECTION:
-                                        ed->ed_Prot = 0;
-                                    case ED_SIZE:
-                                        ed->ed_Size = 0;
-                                    case ED_TYPE:
-                                        ed->ed_Type = ST_USERDIR;
-                                    case ED_NAME:
-                                        ed->ed_Name = (STRPTR)(ed + 1);
-                                        break;
-                                    }
-                                    strncpy(ed->ed_Name, &str[1],
-                                        (size_t)str[0]);
-                                    ed->ed_Name[str[0]] = '\0';
-                                    last = ed;
-                                    ed = (struct ExAllData *)(((STRPTR)ed)
-                                        + elen);
-                                    last->ed_Next = ed;
-                                    ec->eac_Entries++;
-                                } else {
-                                    ec->eac_LastKey = (ULONG)ldl;
-                                    break;
-                                }
-                                ldl = dl;
+                    /* Mounted volumes only - not assigns (ENV:, T:, ...). */
+                    dflags = LDF_VOLUMES | LDF_READ;
+                    if (ec == NULL || type == 0 || type >= sizeof(sizes)) {
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE,
+                            ERROR_NO_MORE_ENTRIES);
+                        break;
+                    }
+                    ldl = lhh_attempt_lock_doslist(gd, dflags);
+                    if (ldl == NULL) {
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_OBJECT_IN_USE);
+                        break;
+                    }
+                    if (ec->eac_LastKey != 0) {
+                        sdl = (struct DosList *)ec->eac_LastKey;
+                        while ((dl = NextDosEntry(ldl, dflags)) != NULL) {
+                            ldl = dl;
+                            if (dl == sdl) {
+                                sdl = NULL;
+                                break;
                             }
                         }
-                        if (last != NULL) {
-                            last->ed_Next = NULL;
+                        ec->eac_LastKey = 0;
+                    }
+                    if (sdl == NULL && ldl != NULL) {
+                        while ((dl = NextDosEntry(ldl, dflags)) != NULL) {
+                            str = (STRPTR)BADDR(dl->dol_Name);
+                            if (str == NULL || IsSelfDosEntry(gd, str)
+                                || dl->dol_Type != DLT_VOLUME
+                                || dl->dol_Task == NULL) {
+                                ldl = dl;
+                                continue;
+                            }
+                            elen = (LONG)sizes[type];
+                            /* +1 for NUL; bare name, no trailing ':' */
+                            len = (LONG)(((str[0] + 1) + 3) & ~(3));
+                            elen += len;
+                            if (size > (ULONG)elen) {
+                                size -= (ULONG)elen;
+                                switch (type) {
+                                case ED_OWNER:
+                                    ed->ed_OwnerUID = 0;
+                                    ed->ed_OwnerGID = 0;
+                                case ED_COMMENT:
+                                    ed->ed_Comment = NULL;
+                                case ED_DATE:
+                                    ed->ed_Days = 0;
+                                    ed->ed_Mins = 0;
+                                    ed->ed_Ticks = 0;
+                                case ED_PROTECTION:
+                                    ed->ed_Prot = 0;
+                                case ED_SIZE:
+                                    ed->ed_Size = 0;
+                                case ED_TYPE:
+                                    ed->ed_Type = ST_USERDIR;
+                                case ED_NAME:
+                                    ed->ed_Name = (STRPTR)(ed + 1);
+                                    break;
+                                }
+                                strncpy(ed->ed_Name, &str[1],
+                                    (size_t)str[0]);
+                                ed->ed_Name[str[0]] = '\0';
+                                last = ed;
+                                ed = (struct ExAllData *)(((STRPTR)ed)
+                                    + elen);
+                                last->ed_Next = ed;
+                                ec->eac_Entries++;
+                            } else {
+                                ec->eac_LastKey = (ULONG)ldl;
+                                break;
+                            }
+                            ldl = dl;
                         }
                     }
-                    if (locked) {
-                        UnLockDosList(LDF_VOLUMES | LDF_ASSIGNS);
+                    if (last != NULL) {
+                        last->ed_Next = NULL;
                     }
-                    if (ec == NULL || ec->eac_LastKey == 0) {
+                    UnLockDosList(dflags);
+                    if (ec->eac_LastKey == 0) {
                         ReplyDosPacket2(gd, Pkt, DOSFALSE,
                             ERROR_NO_MORE_ENTRIES);
                     } else {
@@ -731,14 +983,16 @@ static ULONG lhh_main(void)
                         ReplyDosPacket2(gd, Pkt, DOSTRUE, 0);
                     } else {
                         err = IoErr();
-                        if (err == 0) {
+                        if (err == 0 || err == ERROR_OBJECT_NOT_FOUND) {
                             err = ERROR_NO_MORE_ENTRIES;
                         }
                         ReplyDosPacket2(gd, Pkt, DOSFALSE, err);
                     }
                     break;
                 }
-                if (lock->type == LHH_LOCK_ARCHIVE && lock->lh_lock != ZERO) {
+                if ((lock->type == LHH_LOCK_ARCHIVE
+                        || lock->type == LHH_LOCK_ENTRY)
+                    && lock->lh_lock != ZERO) {
                     ok = LhExAll(lock->lh_lock, (STRPTR)Pkt->dp_Arg2,
                         Pkt->dp_Arg3, Pkt->dp_Arg4, ec);
                     if (ok) {
@@ -779,6 +1033,31 @@ static ULONG lhh_main(void)
                 hh = lhh_handle_open(gd, parent,
                     Pkt->dp_Arg3 ? (STRPTR)BADDR(Pkt->dp_Arg3) : NULL,
                     mode, &err);
+                if (hh == NULL) {
+                    ReplyDosPacket2(gd, Pkt, DOSFALSE, err);
+                    break;
+                }
+                fh->fh_Type = gd->gd_Port;
+                fh->fh_Port = NULL;
+                fh->fh_Arg1 = (LONG)hh;
+                ReplyDosPacket1(gd, Pkt, DOSTRUE);
+            }
+            break;
+
+        case ACTION_FH_FROM_LOCK:
+            {
+                struct FileHandle *fh;
+                struct LhHLock *lock;
+                struct LhHHandle *hh;
+
+                /*
+                 * ARG1 = FileHandle, ARG2 = lock to steal on success.
+                 * Icon.library opens .info this way after Lock+Examine.
+                 */
+                fh = (struct FileHandle *)BADDR(Pkt->dp_Arg1);
+                lock = pkt_lock(gd, (BPTR)Pkt->dp_Arg2);
+                err = ERROR_OBJECT_NOT_FOUND;
+                hh = lhh_handle_from_lock(gd, lock, MODE_OLDFILE, &err);
                 if (hh == NULL) {
                     ReplyDosPacket2(gd, Pkt, DOSFALSE, err);
                     break;
@@ -857,6 +1136,45 @@ static ULONG lhh_main(void)
             }
             break;
 
+        case ACTION_RENAME_OBJECT:
+            {
+                struct LhHLock *from_parent;
+                struct LhHLock *to_parent;
+                LONG ok;
+
+                from_parent = pkt_lock(gd, (BPTR)Pkt->dp_Arg1);
+                to_parent = pkt_lock(gd, (BPTR)Pkt->dp_Arg3);
+                err = ERROR_OBJECT_NOT_FOUND;
+                ok = lhh_rename_name(gd, from_parent,
+                    Pkt->dp_Arg2 ? (STRPTR)BADDR(Pkt->dp_Arg2) : NULL,
+                    to_parent,
+                    Pkt->dp_Arg4 ? (STRPTR)BADDR(Pkt->dp_Arg4) : NULL,
+                    &err);
+                if (ok) {
+                    ReplyDosPacket1(gd, Pkt, DOSTRUE);
+                } else {
+                    ReplyDosPacket2(gd, Pkt, DOSFALSE, err);
+                }
+            }
+            break;
+
+        case ACTION_CREATE_DIR:
+            {
+                struct LhHLock *parent;
+                struct LhHLock *lock;
+
+                parent = pkt_lock(gd, (BPTR)Pkt->dp_Arg1);
+                err = ERROR_OBJECT_NOT_FOUND;
+                lock = lhh_create_dir_name(gd, parent,
+                    Pkt->dp_Arg2 ? (STRPTR)BADDR(Pkt->dp_Arg2) : NULL, &err);
+                if (lock != NULL) {
+                    ReplyDosPacket1(gd, Pkt, MKBADDR(&lock->fl));
+                } else {
+                    ReplyDosPacket2(gd, Pkt, ZERO, err);
+                }
+            }
+            break;
+
         case ACTION_INFO:
             {
                 struct LhHLock *lock;
@@ -877,7 +1195,7 @@ static ULONG lhh_main(void)
                     info->id_NumBlocksUsed = 1;
                     info->id_BytesPerBlock = 512;
                     info->id_DiskType = ID_DOS_DISK;
-                    info->id_VolumeNode = MKBADDR(gd->gd_DosList);
+                    info->id_VolumeNode = lhh_volume_bptr(gd);
                     info->id_InUse = (gd->gd_UsageCnt > 0) ? DOSTRUE : DOSFALSE;
                     ReplyDosPacket1(gd, Pkt, DOSTRUE);
                     break;
@@ -885,7 +1203,7 @@ static ULONG lhh_main(void)
                 if (lock->type == LHH_LOCK_REAL) {
                     ok = lhh_host_info(lock->real_lock, info);
                     if (ok) {
-                        info->id_VolumeNode = MKBADDR(gd->gd_DosList);
+                        info->id_VolumeNode = lhh_volume_bptr(gd);
                         ReplyDosPacket1(gd, Pkt, DOSTRUE);
                     } else {
                         ReplyDosPacket2(gd, Pkt, DOSFALSE, IoErr());
@@ -895,7 +1213,7 @@ static ULONG lhh_main(void)
                 if (lock->lh_lock != ZERO) {
                     ok = LhInfo(lock->lh_lock, info);
                     if (ok) {
-                        info->id_VolumeNode = MKBADDR(gd->gd_DosList);
+                        info->id_VolumeNode = lhh_volume_bptr(gd);
                         ReplyDosPacket1(gd, Pkt, DOSTRUE);
                     } else {
                         ReplyDosPacket2(gd, Pkt, DOSFALSE,
@@ -923,14 +1241,115 @@ static ULONG lhh_main(void)
                 info->id_NumBlocksUsed = 1;
                 info->id_BytesPerBlock = 512;
                 info->id_DiskType = ID_DOS_DISK;
-                info->id_VolumeNode = MKBADDR(gd->gd_DosList);
+                info->id_VolumeNode = lhh_volume_bptr(gd);
                 info->id_InUse = (gd->gd_UsageCnt > 0) ? DOSTRUE : DOSFALSE;
                 ReplyDosPacket1(gd, Pkt, DOSTRUE);
             }
             break;
 
         case ACTION_CURRENT_VOLUME:
-            ReplyDosPacket1(gd, Pkt, MKBADDR(gd->gd_DosList));
+            ReplyDosPacket1(gd, Pkt, lhh_volume_bptr(gd));
+            break;
+
+        case ACTION_FLUSH:
+            ReplyDosPacket1(gd, Pkt, DOSTRUE);
+            break;
+
+        case ACTION_EXAMINE_FH:
+            {
+                struct LhHHandle *hh;
+                struct FileInfoBlock *fib;
+
+                hh = (struct LhHHandle *)Pkt->dp_Arg1;
+                fib = (struct FileInfoBlock *)BADDR(Pkt->dp_Arg2);
+                if (hh == NULL || hh->lock == NULL || fib == NULL) {
+                    ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND);
+                    break;
+                }
+                if (hh->lock->type == LHH_LOCK_VINFO) {
+                    examine_vinfo_fib(gd, hh->lock, fib);
+                    ReplyDosPacket1(gd, Pkt, DOSTRUE);
+                } else if (hh->lock->type == LHH_LOCK_REAL
+                    && hh->lock->real_lock != ZERO) {
+                    if (lhh_host_examine(hh->lock->real_lock, fib)) {
+                        ReplyDosPacket1(gd, Pkt, DOSTRUE);
+                    } else {
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE, IoErr());
+                    }
+                } else if ((hh->lock->type == LHH_LOCK_ARCHIVE
+                        || hh->lock->type == LHH_LOCK_ENTRY)
+                    && hh->lock->lh_lock != ZERO) {
+                    if (LhExamine(hh->lock->lh_lock, fib)) {
+                        lhh_fib_cstr_to_bstr(fib);
+                        ReplyDosPacket1(gd, Pkt, DOSTRUE);
+                    } else {
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE,
+                            LhErr() ? LhErr() : ERROR_OBJECT_NOT_FOUND);
+                    }
+                } else {
+                    ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
+                }
+            }
+            break;
+
+        case ACTION_PARENT_FH:
+            {
+                struct LhHHandle *hh;
+                struct LhHLock *plock;
+
+                hh = (struct LhHHandle *)Pkt->dp_Arg1;
+                err = ERROR_OBJECT_NOT_FOUND;
+                if (hh == NULL || hh->lock == NULL) {
+                    ReplyDosPacket2(gd, Pkt, ZERO, err);
+                    break;
+                }
+                plock = lhh_lock_parent(gd, hh->lock, &err);
+                if (plock != NULL) {
+                    ReplyDosPacket1(gd, Pkt, MKBADDR(&plock->fl));
+                } else {
+                    ReplyDosPacket2(gd, Pkt, ZERO, err);
+                }
+            }
+            break;
+
+        case ACTION_SET_PROTECT:
+        case ACTION_SET_COMMENT:
+        case ACTION_SET_DATE:
+        case ACTION_SET_FILE_SIZE:
+        case ACTION_SET_OWNER:
+        case ACTION_WRITE_PROTECT:
+        case ACTION_RENAME_DISK:
+        case ACTION_FORMAT:
+            /*
+             * Supported packet shape, unsupported operation: always reply
+             * so the caller is not left waiting on pr_MsgPort.
+             */
+            DB2("unsupported write-ish %s (%ld)\n",
+                lhh_pkt_name(Pkt->dp_Type), Pkt->dp_Type);
+            ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_WRITE_PROTECTED);
+            break;
+
+        case ACTION_CHANGE_MODE:
+            /* Shared/exclusive promote: accept without remapping for now. */
+            ReplyDosPacket1(gd, Pkt, DOSTRUE);
+            break;
+
+        case ACTION_ADD_NOTIFY:
+        case ACTION_REMOVE_NOTIFY:
+        case ACTION_MAKE_LINK:
+        case ACTION_READ_LINK:
+        case ACTION_LOCK_RECORD:
+        case ACTION_FREE_RECORD:
+        case ACTION_MORE_CACHE:
+        case ACTION_INHIBIT:
+        case ACTION_SERIALIZE_DISK:
+            /*
+             * Known FFS packets we do not implement.  Reply immediately with
+             * ACTION_NOT_KNOWN - never leave the packet unanswered.
+             */
+            DB2("unsupported %s (%ld)\n",
+                lhh_pkt_name(Pkt->dp_Type), Pkt->dp_Type);
+            ReplyDosPacket2(gd, Pkt, DOSFALSE, ERROR_ACTION_NOT_KNOWN);
             break;
 
         default:

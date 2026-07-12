@@ -37,6 +37,99 @@ static int lhx_fib_is_file(struct FileInfoBlock *fib)
     return 1;
 }
 
+/*
+ * Nested archive walk: LhExamine/LhExNext now yield immediate children.
+ * Build full entry paths (test/test1/file) for list/extract/test/print.
+ */
+static LONG lhx_walk_entries(struct LhArchive *arc, STRPTR dirpath,
+    struct LhxArgs *args,
+    LONG (*fn)(struct LhxArgs *, struct LhArchive *, STRPTR,
+        struct FileInfoBlock *, APTR),
+    APTR ud)
+{
+    BPTR lock;
+    struct FileInfoBlock *fib;
+    LONG ok;
+    LONG rc;
+    char childpath[512];
+    LONG dlen;
+    LONG nlen;
+
+    lock = LhLock(arc, dirpath ? dirpath : (STRPTR)"");
+    if (!lock) {
+        return RETURN_FAIL;
+    }
+    fib = (struct FileInfoBlock *)AllocMem(
+        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!fib) {
+        LhUnLock(lock);
+        return RETURN_FAIL;
+    }
+    /* Examine = directory self; skip.  Children come from ExNext. */
+    if (!LhExamine(lock, fib)) {
+        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+        LhUnLock(lock);
+        return RETURN_OK;
+    }
+    rc = RETURN_OK;
+    ok = LhExNext(lock, fib);
+    while (ok) {
+        dlen = 0;
+        if (dirpath != NULL && dirpath[0] != '\0') {
+            while (dirpath[dlen] != '\0' && dlen < 500) {
+                childpath[dlen] = dirpath[dlen];
+                dlen++;
+            }
+            childpath[dlen++] = '/';
+        }
+        nlen = 0;
+        while (fib->fib_FileName[nlen] != '\0' && dlen + nlen < 511) {
+            childpath[dlen + nlen] = fib->fib_FileName[nlen];
+            nlen++;
+        }
+        childpath[dlen + nlen] = '\0';
+
+        if (!lhx_fib_is_file(fib)) {
+            /* Recurse into nested virtual directory. */
+            if (lhx_walk_entries(arc, (STRPTR)childpath, args, fn, ud)
+                != RETURN_OK) {
+                rc = RETURN_ERROR;
+            }
+        } else if (fn != NULL) {
+            if (fn(args, arc, (STRPTR)childpath, fib, ud) != RETURN_OK) {
+                rc = RETURN_ERROR;
+            }
+        }
+        ok = LhExNext(lock, fib);
+    }
+    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+    LhUnLock(lock);
+    return rc;
+}
+
+struct lhx_list_ud {
+    LONG count;
+    LONG blocks;
+};
+
+static LONG lhx_list_one(struct LhxArgs *args, struct LhArchive *arc,
+    STRPTR fullname, struct FileInfoBlock *fib, APTR ud)
+{
+    struct lhx_list_ud *st;
+
+    (void)arc;
+    st = (struct lhx_list_ud *)ud;
+    if (!lhx_any_selected(fullname, args->files)) {
+        return RETURN_OK;
+    }
+    /* Show full nested path in the name column. */
+    Strncpy(fib->fib_FileName, fullname, (LONG)sizeof(fib->fib_FileName));
+    lhx_list_entry(args, fib);
+    st->count++;
+    st->blocks += fib->fib_NumBlocks;
+    return RETURN_OK;
+}
+
 static struct LhArchive *lhx_open_archive(STRPTR path, LONG mode, STRPTR password)
 {
     struct LhArchive *arc;
@@ -54,49 +147,22 @@ static struct LhArchive *lhx_open_archive(STRPTR path, LONG mode, STRPTR passwor
 LONG lhx_cmd_list(struct LhxArgs *args)
 {
     struct LhArchive *arc;
-    BPTR lock;
-    struct FileInfoBlock *fib;
-    LONG ok;
-    LONG count;
-    LONG blocks;
+    struct lhx_list_ud st;
 
     arc = lhx_open_archive(args->archive, LHARC_MODE_READ, args->password);
     if (!arc) {
         lhx_print_error((STRPTR)"cannot open archive", LhErr());
         return RETURN_FAIL;
     }
-    fib = (struct FileInfoBlock *)AllocMem(
-        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!fib) {
-        LhCloseArchive(arc);
-        return RETURN_FAIL;
-    }
-    lock = LhLock(arc, (STRPTR)"");
-    if (!lock) {
-        lhx_print_error((STRPTR)"cannot lock archive root", LhErr());
-        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-        LhCloseArchive(arc);
-        return RETURN_FAIL;
-    }
-    count = 0;
-    blocks = 0;
-    ok = LhExamine(lock, fib);
-    while (ok) {
-        if (lhx_any_selected(fib->fib_FileName, args->files)) {
-            lhx_list_entry(args, fib);
-            count++;
-            blocks += fib->fib_NumBlocks;
-        }
-        ok = LhExNext(lock, fib);
-    }
-    LhUnLock(lock);
-    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+    st.count = 0;
+    st.blocks = 0;
+    lhx_walk_entries(arc, (STRPTR)"", args, lhx_list_one, (APTR)&st);
     LhCloseArchive(arc);
     if (!args->quiet) {
-        if (count == 0 && args->files && args->files[0]) {
+        if (st.count == 0 && args->files && args->files[0]) {
             Printf("No match found\n", 0);
         } else {
-            lhx_list_total(count, blocks);
+            lhx_list_total(st.count, st.blocks);
         }
     }
     return RETURN_OK;
@@ -177,17 +243,30 @@ static LONG lhx_extract_one(struct LhxArgs *args, struct LhArchive *arc,
     return DOSTRUE;
 }
 
+struct lhx_fail_ud {
+    LONG fail;
+    LONG with_paths;
+};
+
+static LONG lhx_extract_walk_one(struct LhxArgs *args, struct LhArchive *arc,
+    STRPTR fullname, struct FileInfoBlock *fib, APTR ud)
+{
+    struct lhx_fail_ud *st;
+
+    st = (struct lhx_fail_ud *)ud;
+    if (!lhx_any_selected(fullname, args->files)) {
+        return RETURN_OK;
+    }
+    if (!lhx_extract_one(args, arc, fullname, st->with_paths, fib->fib_Size)) {
+        st->fail++;
+    }
+    return RETURN_OK;
+}
+
 LONG lhx_cmd_extract(struct LhxArgs *args, LONG with_paths)
 {
     struct LhArchive *arc;
-    BPTR lock;
-    struct FileInfoBlock *fib;
-    LONG ok;
-    LONG fail;
-    LONG idx;
-    LONG tried;
-    LONG skipped_dir;
-    LONG skipped_pat;
+    struct lhx_fail_ud st;
 
     lhx_dbg_s((STRPTR)"cmd", (STRPTR)"EXTRACT");
     lhx_dbg_l((STRPTR)"with_paths", with_paths);
@@ -197,59 +276,11 @@ LONG lhx_cmd_extract(struct LhxArgs *args, LONG with_paths)
         lhx_print_error((STRPTR)"cannot open archive", LhErr());
         return RETURN_FAIL;
     }
-    lhx_dbg_l((STRPTR)"arc", (LONG)arc);
-    fib = (struct FileInfoBlock *)AllocMem(
-        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!fib) {
-        LhCloseArchive(arc);
-        return RETURN_FAIL;
-    }
-    lock = LhLock(arc, (STRPTR)"");
-    if (!lock) {
-        lhx_dbg_l((STRPTR)"LhLock LhErr", LhErr());
-        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-        LhCloseArchive(arc);
-        return RETURN_FAIL;
-    }
-    lhx_dbg_l((STRPTR)"lock", (LONG)lock);
-    fail = 0;
-    idx = 0;
-    tried = 0;
-    skipped_dir = 0;
-    skipped_pat = 0;
-    ok = LhExamine(lock, fib);
-    lhx_dbg_l((STRPTR)"LhExamine", ok);
-    if (!ok) {
-        lhx_dbg_l((STRPTR)"IoErr after Examine", IoErr());
-    }
-    while (ok) {
-        lhx_dbg_l((STRPTR)"idx", idx);
-        lhx_dbg_s((STRPTR)"entry", fib->fib_FileName);
-        lhx_dbg_ll((STRPTR)"type size", fib->fib_DirEntryType, fib->fib_Size);
-        if (!lhx_fib_is_file(fib)) {
-            skipped_dir++;
-            lhx_dbg_s((STRPTR)"skip", (STRPTR)"not a file (dir)");
-        } else if (!lhx_any_selected(fib->fib_FileName, args->files)) {
-            skipped_pat++;
-            lhx_dbg_s((STRPTR)"skip", (STRPTR)"pattern mismatch");
-        } else {
-            tried++;
-            if (!lhx_extract_one(args, arc, fib->fib_FileName, with_paths,
-                    fib->fib_Size)) {
-                fail++;
-            }
-        }
-        idx++;
-        ok = LhExNext(lock, fib);
-    }
-    lhx_dbg_l((STRPTR)"IoErr after loop", IoErr());
-    lhx_dbg_ll((STRPTR)"summary tried fail", tried, fail);
-    lhx_dbg_ll((STRPTR)"skipped dir pat", skipped_dir, skipped_pat);
-    lhx_dbg_l((STRPTR)"entries seen", idx);
-    LhUnLock(lock);
-    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+    st.fail = 0;
+    st.with_paths = with_paths;
+    lhx_walk_entries(arc, (STRPTR)"", args, lhx_extract_walk_one, (APTR)&st);
     LhCloseArchive(arc);
-    return fail > 0 ? RETURN_WARN : RETURN_OK;
+    return st.fail > 0 ? RETURN_WARN : RETURN_OK;
 }
 
 LONG lhx_cmd_add(struct LhxArgs *args)
@@ -341,17 +372,34 @@ LONG lhx_cmd_add(struct LhxArgs *args)
     return RETURN_OK;
 }
 
+struct lhx_test_ud {
+    LONG fail;
+};
+
+static LONG lhx_test_walk_one(struct LhxArgs *args, struct LhArchive *arc,
+    STRPTR fullname, struct FileInfoBlock *fib, APTR ud)
+{
+    struct lhx_test_ud *st;
+    LONG len;
+
+    st = (struct lhx_test_ud *)ud;
+    if (!lhx_any_selected(fullname, args->files)) {
+        return RETURN_OK;
+    }
+    len = LhTestEntry(arc, fullname);
+    if (len < 0 || len != fib->fib_Size) {
+        st->fail++;
+        return RETURN_ERROR;
+    }
+    lhx_work_start(args, fullname);
+    lhx_work_done(args, 1);
+    return RETURN_OK;
+}
+
 LONG lhx_cmd_test(struct LhxArgs *args)
 {
     struct LhArchive *arc;
-    BPTR lock;
-    struct FileInfoBlock *fib;
-    LONG ok;
-    LONG len;
-    LONG idx;
-    LONG tried;
-    LONG skipped_dir;
-    LONG skipped_pat;
+    struct lhx_test_ud st;
 
     lhx_dbg_s((STRPTR)"cmd", (STRPTR)"TEST");
     arc = lhx_open_archive(args->archive, LHARC_MODE_READ, args->password);
@@ -360,110 +408,44 @@ LONG lhx_cmd_test(struct LhxArgs *args)
         lhx_print_error((STRPTR)"cannot open archive", LhErr());
         return RETURN_FAIL;
     }
-    fib = (struct FileInfoBlock *)AllocMem(
-        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!fib) {
+    st.fail = 0;
+    if (lhx_walk_entries(arc, (STRPTR)"", args, lhx_test_walk_one, (APTR)&st)
+        != RETURN_OK || st.fail > 0) {
         LhCloseArchive(arc);
         return RETURN_FAIL;
     }
-    lock = LhLock(arc, (STRPTR)"");
-    if (!lock) {
-        lhx_dbg_l((STRPTR)"LhLock LhErr", LhErr());
-        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-        LhCloseArchive(arc);
-        return RETURN_FAIL;
-    }
-    idx = 0;
-    tried = 0;
-    skipped_dir = 0;
-    skipped_pat = 0;
-    ok = LhExamine(lock, fib);
-    lhx_dbg_l((STRPTR)"LhExamine", ok);
-    if (!ok) {
-        lhx_dbg_l((STRPTR)"IoErr after Examine", IoErr());
-    }
-    while (ok) {
-        lhx_dbg_l((STRPTR)"idx", idx);
-        lhx_dbg_s((STRPTR)"entry", fib->fib_FileName);
-        lhx_dbg_ll((STRPTR)"type size", fib->fib_DirEntryType, fib->fib_Size);
-        if (!lhx_fib_is_file(fib)) {
-            skipped_dir++;
-            lhx_dbg_s((STRPTR)"skip", (STRPTR)"not a file (dir)");
-        } else if (!lhx_any_selected(fib->fib_FileName, args->files)) {
-            skipped_pat++;
-            lhx_dbg_s((STRPTR)"skip", (STRPTR)"pattern mismatch");
-        } else {
-            tried++;
-            len = LhTestEntry(arc, fib->fib_FileName);
-            if (len < 0) {
-                lhx_dbg_l((STRPTR)"LhTestEntry LhErr", LhErr());
-                LhUnLock(lock);
-                FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-                LhCloseArchive(arc);
-                return RETURN_FAIL;
-            }
-            lhx_dbg_l((STRPTR)"LhTestEntry len", len);
-            if (len != fib->fib_Size) {
-                lhx_dbg_ll((STRPTR)"size mismatch got want", len, fib->fib_Size);
-                LhUnLock(lock);
-                FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-                LhCloseArchive(arc);
-                return RETURN_FAIL;
-            }
-            lhx_work_start(args, fib->fib_FileName);
-            lhx_work_done(args, 1);
-        }
-        idx++;
-        ok = LhExNext(lock, fib);
-    }
-    lhx_dbg_l((STRPTR)"IoErr after loop", IoErr());
-    lhx_dbg_ll((STRPTR)"summary tried", tried, idx);
-    lhx_dbg_ll((STRPTR)"skipped dir pat", skipped_dir, skipped_pat);
-    LhUnLock(lock);
-    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
     LhCloseArchive(arc);
+    return RETURN_OK;
+}
+
+static LONG lhx_print_walk_one(struct LhxArgs *args, struct LhArchive *arc,
+    STRPTR fullname, struct FileInfoBlock *fib, APTR ud)
+{
+    (void)fib;
+    (void)ud;
+    if (!lhx_any_selected(fullname, args->files)) {
+        return RETURN_OK;
+    }
+    if (!LhPrintEntry(arc, fullname)) {
+        return RETURN_ERROR;
+    }
     return RETURN_OK;
 }
 
 LONG lhx_cmd_print(struct LhxArgs *args)
 {
     struct LhArchive *arc;
-    BPTR lock;
-    struct FileInfoBlock *fib;
-    LONG ok;
 
     arc = lhx_open_archive(args->archive, LHARC_MODE_READ, args->password);
     if (!arc) {
         lhx_print_error((STRPTR)"cannot open archive", LhErr());
         return RETURN_FAIL;
     }
-    fib = (struct FileInfoBlock *)AllocMem(
-        (ULONG)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!fib) {
+    if (lhx_walk_entries(arc, (STRPTR)"", args, lhx_print_walk_one, NULL)
+        != RETURN_OK) {
         LhCloseArchive(arc);
         return RETURN_FAIL;
     }
-    lock = LhLock(arc, (STRPTR)"");
-    if (!lock) {
-        FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-        LhCloseArchive(arc);
-        return RETURN_FAIL;
-    }
-    ok = LhExamine(lock, fib);
-    while (ok) {
-        if (lhx_fib_is_file(fib)
-            && lhx_any_selected(fib->fib_FileName, args->files)) {
-            if (!LhPrintEntry(arc, fib->fib_FileName)) {
-                LhUnLock(lock);
-                FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
-                LhCloseArchive(arc);
-                return RETURN_FAIL;
-            }
-        }
-        ok = LhExNext(lock, fib);
-    }
-    LhUnLock(lock);
-    FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
     LhCloseArchive(arc);
     Flush(Output());
     return RETURN_OK;

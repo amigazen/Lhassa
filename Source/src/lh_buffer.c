@@ -4,6 +4,9 @@
  * Copyright (c) 2026 amigazen project
  *
  * lh_buffer.c - lh.library-compatible in-memory buffer API.
+ *
+ * LhEncode / LhDecode use classic LZHUF (see lh_lzhuf.c).  CreateBuffer
+ * sizes match Lh.doc: 40000 encode aux, 4500 decode-only aux.
  */
 
 #include "lh_internal.h"
@@ -50,53 +53,33 @@ void lh_delete_buffer(LhBuffer *buf)
 
 unsigned long lh_encode(LhBuffer *buf)
 {
-    lh_status st;
-    size_t out_len;
     size_t min_dst;
-    unsigned long result;
 
     if (!buf || !buf->lh_Src || !buf->lh_Dst || buf->lh_SrcSize == 0) {
+        return 0;
+    }
+    if (!buf->lh_Aux || buf->lh_AuxSize == 0) {
         return 0;
     }
     min_dst = (size_t)buf->lh_SrcSize + LH_ENCODE_EXTRA((size_t)buf->lh_SrcSize);
     if ((size_t)buf->lh_DstSize < min_dst) {
         return 0;
     }
-    /*
-     * Classic Krekel LhEncode used lh_Aux for adaptive LZH (not ported here).
-     * Use LH0 store so LhEncode/LhDecode roundtrip stays safe on small stacks
-     * when called through lh.library from CLI clients.
-     */
-    out_len = (size_t)buf->lh_DstSize;
-    st = lh_compress(LH_METHOD_LH0,
-        (const unsigned char *)buf->lh_Src, (size_t)buf->lh_SrcSize,
-        (unsigned char *)buf->lh_Dst, &out_len);
-    if (st != LH_OK) {
-        return 0;
-    }
-    result = (unsigned long)out_len;
-    buf->lh_DstSize = result;
-    return result;
+    /* Adaptive LZH (LZHUF) — original lh.library LhEncode. */
+    return lh_lzhuf_encode(buf);
 }
 
 unsigned long lh_decode(LhBuffer *buf)
 {
-    lh_status st;
-    size_t expected;
-
     if (!buf || !buf->lh_Src || !buf->lh_Dst || buf->lh_SrcSize == 0) {
         return 0;
     }
     if (buf->lh_DstSize == 0) {
         return 0;
     }
-    expected = (size_t)buf->lh_DstSize;
-    st = lh_decompress(LH_METHOD_LH0,
-        (const unsigned char *)buf->lh_Src, (size_t)buf->lh_SrcSize,
-        expected,
-        (unsigned char *)buf->lh_Dst, expected);
-    if (st != LH_OK) {
+    if (!buf->lh_Aux || buf->lh_AuxSize == 0) {
         return 0;
     }
-    return buf->lh_DstSize;
+    /* Adaptive LZH (LZHUF) — original lh.library LhDecode. */
+    return lh_lzhuf_decode(buf);
 }
