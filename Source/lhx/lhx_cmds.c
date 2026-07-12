@@ -14,7 +14,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/utility.h>
-#include <libraries/lhlib.h>
+#include <libraries/lh.h>
 #include <proto/lh.h>
 
 #include "lhx_internal.h"

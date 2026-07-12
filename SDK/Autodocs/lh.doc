@@ -60,7 +60,7 @@ lh.library/LhErr
    LINKING TIERS
 
    Tier 0 -- lh.library + <proto/lh.h>  (preferred)
-     Shared library; use <libraries/lhlib.h> for public types and constants.
+     Shared library; use <libraries/lh.h> for public types and constants.
 
    Tier 1 -- lh.lib static core
      Codec and buffer API only, linked into one executable.
@@ -107,7 +107,7 @@ lh.library/LhErr
 
    INCLUDE FILES
 
-   #include <libraries/lhlib.h>
+   #include <libraries/lh.h>
    #include <proto/lh.h>
 
    SEE ALSO
@@ -160,7 +160,7 @@ lh.library/LhErr
 
    GENERAL INFORMATION
 
-   Constants and types are defined in <libraries/lhlib.h>.
+   Constants and types are defined in <libraries/lh.h>.
 
    LIBRARY
 

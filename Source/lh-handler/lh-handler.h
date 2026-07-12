@@ -29,7 +29,7 @@
 #include <proto/dos.h>
 #include <proto/utility.h>
 
-#include <libraries/lhlib.h>
+#include <libraries/lh.h>
 #include <proto/lh.h>
 
 #include "lh-handler_rev.h"
@@ -67,6 +67,7 @@ struct LhHArc {
     char real_path[LHH_PATH_LEN];
     struct LhArchive *archive;
     LONG refcount;
+    struct LhHLock *users;        /* locks holding this arc (relink after refresh) */
 };
 
 struct LhHLock {
@@ -74,6 +75,7 @@ struct LhHLock {
     ULONG magic;
     ULONG type;
     struct LhHArc *arc;
+    struct LhHLock *arc_next;     /* in LhHArc.users */
     BPTR lh_lock;                 /* lh.library lock (ARCHIVE/ENTRY) */
     BPTR real_lock;               /* dos.library lock (REAL) */
     char entry[LHH_PATH_LEN];     /* archive entry name */
@@ -191,7 +193,8 @@ struct DosList *lhh_attempt_lock_doslist(GD gd, ULONG flags);
 /* lh_arc.c */
 int lhh_lock_valid(GD gd, struct LhHLock *lock);
 void lhh_arc_init(GD gd);
-struct LhHArc *lhh_arc_obtain(GD gd, const char *real_path, LONG *err);
+struct LhHArc *lhh_arc_obtain(GD gd, const char *real_path, BPTR host_lock,
+    LONG *err);
 void lhh_arc_release(GD gd, struct LhHArc *arc);
 int lhh_arc_refresh(GD gd, struct LhHArc *arc, LONG *err);
 struct LhHLock *lhh_lock_alloc(GD gd, ULONG type, struct LhHArc *arc,
@@ -219,21 +222,22 @@ struct LhHLock *lhh_create_dir_name(GD gd, struct LhHLock *parent,
 
 /* lh_pkt.c - host FS via SendPkt + private reply (never waits on gd_Port). */
 void lhh_host_pkt_cleanup(void);
-BPTR lhh_host_lock(STRPTR name, LONG mode);
+BPTR GetA4 lhh_host_lock(STRPTR name, LONG mode);
 BPTR lhh_host_lock_from(BPTR parent, STRPTR name, LONG mode);
-LONG lhh_host_unlock(BPTR lock);
+LONG GetA4 lhh_host_unlock(BPTR lock);
 BPTR lhh_host_duplock(BPTR lock);
 BPTR lhh_host_parentdir(BPTR lock);
-LONG lhh_host_examine(BPTR lock, struct FileInfoBlock *fib);
+LONG GetA4 lhh_host_examine(BPTR lock, struct FileInfoBlock *fib);
 LONG lhh_host_exnext(BPTR lock, struct FileInfoBlock *fib);
 LONG lhh_host_exall(BPTR lock, STRPTR buffer, LONG size, LONG type,
     struct ExAllControl *ec);
 LONG lhh_host_info(BPTR lock, struct InfoData *info);
-BPTR lhh_host_open(STRPTR name, LONG mode);
-LONG lhh_host_close(BPTR fh_bptr);
-LONG lhh_host_read(BPTR fh_bptr, APTR buf, LONG len);
-LONG lhh_host_write(BPTR fh_bptr, APTR buf, LONG len);
-LONG lhh_host_seek(BPTR fh_bptr, LONG pos, LONG mode);
+BPTR GetA4 lhh_host_open(STRPTR name, LONG mode);
+BPTR GetA4 lhh_host_open_from_lock(BPTR lock);
+LONG GetA4 lhh_host_close(BPTR fh_bptr);
+LONG GetA4 lhh_host_read(BPTR fh_bptr, APTR buf, LONG len);
+LONG GetA4 lhh_host_write(BPTR fh_bptr, APTR buf, LONG len);
+LONG GetA4 lhh_host_seek(BPTR fh_bptr, LONG pos, LONG mode);
 LONG lhh_host_delete(STRPTR name);
 LONG lhh_host_rename(STRPTR oldpath, STRPTR newpath);
 

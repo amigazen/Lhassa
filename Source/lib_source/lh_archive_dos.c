@@ -158,6 +158,9 @@ struct LhArchive {
     int has_password;
     lh_datetime archive_dt;
     int has_archive_dt;
+    /* AllocVec'd .lha image (handler); extract rewinds this, never path Open. */
+    unsigned char *file_mem;
+    unsigned long file_mem_len;
 };
 
 struct LhLock {
@@ -637,6 +640,16 @@ static int lh_read_entry_data(struct LhArchive *arc, const char *name,
     return 0;
 }
 
+static void lh_arc_drop_file_mem(struct LhArchive *arc)
+{
+    if (!arc || !arc->file_mem) {
+        return;
+    }
+    FreeVec(arc->file_mem);
+    arc->file_mem = NULL;
+    arc->file_mem_len = 0;
+}
+
 static void lh_reopen_reader(struct LhArchive *arc)
 {
     lh_status err;
@@ -645,9 +658,21 @@ static void lh_reopen_reader(struct LhArchive *arc)
         return;
     }
     if (arc->reader) {
+        /*
+         * Rewind in place.  Close+path-reopen WaitPkts on the handler port
+         * under heavy traffic; memory-backed archives never need path Open.
+         */
+        if (lh_reader_rewind(arc->reader)) {
+            return;
+        }
         lh_reader_close(&arc->reader);
     }
-    arc->reader = lh_reader_open(arc->path, &err);
+    if (arc->file_mem != NULL && arc->file_mem_len > 0) {
+        arc->reader = lh_reader_open_mem(arc->file_mem, arc->file_mem_len, 0,
+            &err);
+    } else {
+        arc->reader = lh_reader_open(arc->path, &err);
+    }
     if (arc->reader && arc->has_password) {
         lh_reader_set_password(arc->reader, arc->password);
     }
@@ -697,14 +722,30 @@ struct LhArchive *lh_arc_open(STRPTR path, LONG mode)
         }
         return arc;
     }
-    arc->reader = lh_reader_open(arc->path, &err);
+    /*
+     * Prefer pending memory image from the handler (private-reply load).
+     * owned=0: FreeVec on lh_arc_close via file_mem.
+     */
+    if (LhBase != NULL && LhBase->lhb_PendingMem != NULL
+        && LhBase->lhb_PendingMemLen > 0) {
+        arc->file_mem = (unsigned char *)LhBase->lhb_PendingMem;
+        arc->file_mem_len = LhBase->lhb_PendingMemLen;
+        LhBase->lhb_PendingMem = NULL;
+        LhBase->lhb_PendingMemLen = 0;
+        arc->reader = lh_reader_open_mem(arc->file_mem, arc->file_mem_len, 0,
+            &err);
+    } else {
+        arc->reader = lh_reader_open(arc->path, &err);
+    }
     if (!arc->reader) {
+        lh_arc_drop_file_mem(arc);
         free(arc);
         lh_arc_seterr(ERROR_OBJECT_NOT_FOUND);
         return NULL;
     }
     if (!lh_arc_build_catalog(arc)) {
         lh_reader_close(&arc->reader);
+        lh_arc_drop_file_mem(arc);
         free(arc);
         lh_arc_seterr(ERROR_READ_PROTECTED);
         return NULL;
@@ -728,6 +769,7 @@ LONG lh_arc_close(struct LhArchive *archive)
         lh_writer_close(&archive->writer);
     }
     lh_arc_clear_catalog(archive);
+    lh_arc_drop_file_mem(archive);
     free(archive);
     return DOSTRUE;
 }
@@ -1595,7 +1637,7 @@ LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG le
  * compress/decompress round-trips reliably (real LHA rejects bad LH5).
  * Request LH5 explicitly with LHADD_Method / LhAddEntryTags.
  *
- * Tags (libraries/lhlib.h):
+ * Tags (libraries/lh.h):
  *   LHADD_Method     - lh_level (0=store, 5=lh5, 11=dir)
  *   LHADD_Attrs      - Amiga protection bits -> LHA attribute byte
  *   LHADD_DateStamp  - struct DateStamp *
@@ -1705,6 +1747,8 @@ LONG lh_arc_delete_entry(struct LhArchive *archive, STRPTR name)
     if (had_reader) {
         lh_reader_close(&archive->reader);
     }
+    /* On-disk rewrite invalidates any memory image of the old file. */
+    lh_arc_drop_file_mem(archive);
     st = lh_archive_rewrite(archive->path, lh_keep_not_name, (void *)name,
         2, LH_LEVEL_STORE, 1);
     if (st != LH_OK) {

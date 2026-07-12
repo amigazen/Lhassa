@@ -23,7 +23,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
-/* Lock+Examine via dos.library (native paths). */
+/* Lock+Examine for archive mtime. */
 static int lh_capture_mtime_amiga(const char *path, lh_datetime *dt)
 {
     BPTR lock;
@@ -38,17 +38,17 @@ static int lh_capture_mtime_amiga(const char *path, lh_datetime *dt)
     if (!lock) {
         return 0;
     }
-    fib = (struct FileInfoBlock *)AllocMem(
-        (long)sizeof(struct FileInfoBlock), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!fib) {
+    fib = (struct FileInfoBlock *)AllocMem(sizeof(struct FileInfoBlock),
+        MEMF_PUBLIC | MEMF_CLEAR);
+    if (fib == NULL) {
         UnLock(lock);
         return 0;
     }
     if (Examine(lock, fib)) {
-        lh_datetime_from_datestamp(&fib->fib_Date, dt);
         ok = 1;
+        lh_datetime_from_datestamp(&fib->fib_Date, dt);
     }
-    FreeMem((APTR)fib, (long)sizeof(struct FileInfoBlock));
+    FreeMem(fib, sizeof(struct FileInfoBlock));
     UnLock(lock);
     return ok;
 }
@@ -61,8 +61,31 @@ void lh_stream_init(lh_stream *s)
     }
 #ifdef LH_AMIGA
     s->lh_fh = 0;
+    s->mem = NULL;
+    s->mem_len = 0;
+    s->mem_pos = 0;
+    s->mem_owned = 0;
 #elif defined(LH_HOST)
     s->lh_fp = NULL;
+#endif
+}
+
+int lh_stream_open_mem(lh_stream *s, const void *data, unsigned long len,
+    int owned)
+{
+    if (!s || !data || len == 0) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    s->lh_fh = 0;
+    s->mem = (const unsigned char *)data;
+    s->mem_len = len;
+    s->mem_pos = 0;
+    s->mem_owned = owned ? 1 : 0;
+    return 1;
+#else
+    (void)owned;
+    return 0;
 #endif
 }
 
@@ -72,6 +95,22 @@ int lh_stream_open_read(lh_stream *s, const char *path)
         return 0;
     }
 #ifdef LH_AMIGA
+    /*
+     * Handler may leave AllocVec'd archive bytes on LHBase so Open/Read never
+     * WaitPkt on the LHA: process MsgPort during catalog or extract.
+     */
+    if (LhBase != NULL && LhBase->lhb_PendingMem != NULL
+        && LhBase->lhb_PendingMemLen > 0) {
+        APTR mem;
+        ULONG len;
+
+        mem = LhBase->lhb_PendingMem;
+        len = LhBase->lhb_PendingMemLen;
+        LhBase->lhb_PendingMem = NULL;
+        LhBase->lhb_PendingMemLen = 0;
+        (void)path;
+        return lh_stream_open_mem(s, mem, len, 1);
+    }
     s->lh_fh = Open((STRPTR)path, MODE_OLDFILE);
     return s->lh_fh != 0;
 #elif defined(LH_HOST)
@@ -92,6 +131,13 @@ void lh_stream_close(lh_stream *s)
         Close(s->lh_fh);
         s->lh_fh = 0;
     }
+    if (s->mem != NULL && s->mem_owned) {
+        FreeVec((APTR)s->mem);
+    }
+    s->mem = NULL;
+    s->mem_len = 0;
+    s->mem_pos = 0;
+    s->mem_owned = 0;
 #elif defined(LH_HOST)
     if (s->lh_fp) {
         fclose(s->lh_fp);
@@ -104,12 +150,27 @@ size_t lh_stream_read(lh_stream *s, void *buf, size_t n)
 {
 #ifdef LH_AMIGA
     LONG got;
+    unsigned long left;
+    unsigned long take;
 #endif
 
     if (!s || !buf || n == 0) {
         return 0;
     }
 #ifdef LH_AMIGA
+    if (s->mem != NULL) {
+        if (s->mem_pos >= s->mem_len) {
+            return 0;
+        }
+        left = s->mem_len - s->mem_pos;
+        take = (unsigned long)n;
+        if (take > left) {
+            take = left;
+        }
+        memcpy(buf, s->mem + s->mem_pos, (size_t)take);
+        s->mem_pos += take;
+        return (size_t)take;
+    }
     if (!s->lh_fh) {
         return 0;
     }
@@ -134,10 +195,19 @@ int lh_stream_seek_cur(lh_stream *s, long delta)
         return 0;
     }
 #ifdef LH_AMIGA
+    if (s->mem != NULL) {
+        long np;
+
+        np = (long)s->mem_pos + delta;
+        if (np < 0 || (unsigned long)np > s->mem_len) {
+            return 0;
+        }
+        s->mem_pos = (unsigned long)np;
+        return 1;
+    }
     if (!s->lh_fh) {
         return 0;
     }
-    /* Seek(fh, position, mode) per dos.doc */
     return Seek(s->lh_fh, (LONG)delta, OFFSET_CURRENT) != -1L;
 #elif defined(LH_HOST)
     if (!s->lh_fp) {
@@ -149,12 +219,39 @@ int lh_stream_seek_cur(lh_stream *s, long delta)
 #endif
 }
 
+int lh_stream_rewind(lh_stream *s)
+{
+    if (!s) {
+        return 0;
+    }
+#ifdef LH_AMIGA
+    if (s->mem != NULL) {
+        s->mem_pos = 0;
+        return 1;
+    }
+    if (!s->lh_fh) {
+        return 0;
+    }
+    return Seek(s->lh_fh, 0, OFFSET_BEGINNING) != -1L;
+#elif defined(LH_HOST)
+    if (!s->lh_fp) {
+        return 0;
+    }
+    return fseek(s->lh_fp, 0L, SEEK_SET) == 0;
+#else
+    return 0;
+#endif
+}
+
 long lh_stream_tell(lh_stream *s)
 {
     if (!s) {
         return -1L;
     }
 #ifdef LH_AMIGA
+    if (s->mem != NULL) {
+        return (long)s->mem_pos;
+    }
     if (!s->lh_fh) {
         return -1L;
     }
@@ -175,9 +272,6 @@ int lh_stream_open_write(lh_stream *s, const char *path)
     BPTR fh;
     LONG ioerr;
     int retry;
-#endif
-
-#ifdef LH_AMIGA
     char aside[560];
     LONG plen;
 #endif
@@ -260,16 +354,19 @@ int lh_stream_open_append(lh_stream *s, const char *path)
 int lh_stream_file_exists(const char *path)
 {
 #ifdef LH_AMIGA
-    BPTR fh;
+    BPTR lock;
 
     if (!path) {
         return 0;
     }
-    fh = Open((STRPTR)path, MODE_OLDFILE);
-    if (!fh) {
+    if (LhBase != NULL && LhBase->lhb_PendingMem != NULL) {
+        return 1;
+    }
+    lock = Lock((STRPTR)path, ACCESS_READ);
+    if (lock == ZERO) {
         return 0;
     }
-    Close(fh);
+    UnLock(lock);
     return 1;
 #elif defined(LH_HOST)
     FILE *fp;
@@ -629,7 +726,46 @@ lh_reader *lh_reader_open(const char *path, lh_status *err)
         }
         return NULL;
     }
+    /* Memory-backed open skips Lock (avoids WaitPkt on handler port). */
+#ifdef LH_AMIGA
+    if (r->io.mem == NULL) {
+        lh_reader_capture_mtime(r, path);
+    }
+#else
     lh_reader_capture_mtime(r, path);
+#endif
+    if (err) {
+        *err = LH_OK;
+    }
+    return r;
+}
+
+lh_reader *lh_reader_open_mem(const void *data, unsigned long len, int owned,
+    lh_status *err)
+{
+    lh_reader *r;
+
+    if (!data || len == 0) {
+        if (err) {
+            *err = LH_ERR_INVALID_ARG;
+        }
+        return NULL;
+    }
+    r = (lh_reader *)calloc(1, sizeof(*r));
+    if (!r) {
+        if (err) {
+            *err = LH_ERR_NO_MEMORY;
+        }
+        return NULL;
+    }
+    lh_stream_init(&r->io);
+    if (!lh_stream_open_mem(&r->io, data, len, owned)) {
+        free(r);
+        if (err) {
+            *err = LH_ERR_IO;
+        }
+        return NULL;
+    }
     if (err) {
         *err = LH_OK;
     }
@@ -795,6 +931,22 @@ lh_status lh_reader_next(lh_reader *r, lh_entry *entry)
     }
     lh_hdr_meta_clear(&meta);
     return LH_OK;
+}
+
+int lh_reader_rewind(lh_reader *r)
+{
+    if (!r) {
+        return 0;
+    }
+    if (!lh_stream_rewind(&r->io)) {
+        return 0;
+    }
+    /* Catalog walks set eof; must clear or lh_reader_next stays at EOF. */
+    r->eof = 0;
+    if (r->has_password) {
+        lh_decrypt_init(&r->decrypt, r->password);
+    }
+    return 1;
 }
 
 void lh_reader_close(lh_reader **r)

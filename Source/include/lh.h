@@ -168,6 +168,8 @@ lh_status lh_writer_close(lh_writer **w);
 /* --- reader --- */
 
 lh_reader *lh_reader_open(const char *path, lh_status *err);
+lh_reader *lh_reader_open_mem(const void *data, unsigned long len, int owned,
+    lh_status *err);
 lh_status lh_reader_set_password(lh_reader *r, const char *password);
 
 typedef void (*lh_progress_fn)(void *ctx, size_t done, size_t total);
@@ -188,6 +190,7 @@ void lh_reader_set_header_only(lh_reader *r, int on);
 int lh_reader_archive_datetime(const lh_reader *r, lh_datetime *dt);
 
 lh_status lh_reader_next(lh_reader *r, lh_entry *entry);
+int lh_reader_rewind(lh_reader *r);
 void lh_reader_close(lh_reader **r);
 void lh_entry_clear(lh_entry *entry);
 

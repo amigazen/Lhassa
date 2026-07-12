@@ -39,7 +39,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <libraries/lhlib.h>
+#include <libraries/lh.h>
 #include <proto/lh.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -508,10 +508,16 @@ lt_count_entries(STRPTR path, LONG *count_out)
         LhCloseArchive(arc);
         return FALSE;
     }
+    /*
+     * Amiga dir walk: Examine fills the directory itself; ExNext yields
+     * children.  Count children only (matches LhExAll / catalog size).
+     */
     ok = LhExamine(lock, fib);
     while (ok) {
-        count++;
         ok = LhExNext(lock, fib);
+        if (ok) {
+            count++;
+        }
     }
     LhUnLock(lock);
     FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
@@ -922,8 +928,11 @@ lt_test_lock_examine(STRPTR path, LONG expect_count)
         return;
     }
     lt_end(TRUE, fib->fib_FileName);
-    count = 1;
 
+    /*
+     * Root Examine returns the directory FIB (empty name); children come
+     * from ExNext only - same as dos.library on a real directory lock.
+     */
     lt_begin((STRPTR)"LhExNext", (STRPTR)"walk remaining entries");
     while (LhExNext(lock, fib)) {
         count++;

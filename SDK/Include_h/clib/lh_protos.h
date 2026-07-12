@@ -24,8 +24,8 @@ extern "C" {
 #ifndef DOS_EXALL_H
 #include <dos/exall.h>
 #endif
-#ifndef LIBRARIES_LHLIB_H
-#include <libraries/lhlib.h>
+#ifndef LIBRARIES_LH_H
+#include <libraries/lh.h>
 #endif
 #ifndef UTILITY_TAGITEM_H
 #include <utility/tagitem.h>

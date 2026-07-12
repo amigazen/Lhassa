@@ -20,7 +20,7 @@
 #include <exec/nodes.h>
 #include <dos/dosextens.h>
 
-LONG lhh_host_unlock(BPTR lock);
+LONG GetA4 lhh_host_unlock(BPTR lock);
 
 /*
  * This file has no GD parameter.  Redirect the root-handler-style base
@@ -213,7 +213,15 @@ static int lhh_host_resolve_name(STRPTR name, struct LhhHostVol *hv,
         return 1;
     }
 
-    /* Fallback: DeviceProc("Vol:") - clear IoErr so a stale code is not a lock. */
+    /*
+     * DeviceProc WaitPkts on pr_MsgPort - fatal inside the LHA: handler.
+     * DosList is the only safe resolve path when LhhGD is live.
+     */
+    if (LhhGD != NULL) {
+        return 0;
+    }
+
+    /* Fallback (non-handler callers only): DeviceProc("Vol:"). */
     volname[i] = ':';
     volname[i + 1] = '\0';
     SetIoErr(0);
@@ -459,7 +467,7 @@ static void lhh_host_split_dir_file(const char *path, char *dir, LONG dirlen,
     lhh_cstr_copy(file, path + last + 1, filelen);
 }
 
-BPTR lhh_host_lock(STRPTR name, LONG mode)
+BPTR GetA4 lhh_host_lock(STRPTR name, LONG mode)
 {
     struct LhhHostVol hv;
     const char *rest;
@@ -557,20 +565,23 @@ BPTR lhh_host_lock_from(BPTR parent, STRPTR name, LONG mode)
     return ZERO;
 }
 
-LONG lhh_host_unlock(BPTR lock)
+LONG GetA4 lhh_host_unlock(BPTR lock)
 {
-    struct FileLock *fl;
     LONG res2;
+    LONG res1;
+    struct FileLock *fl;
 
     if (lock == ZERO) {
         return DOSFALSE;
     }
     fl = (struct FileLock *)BADDR(lock);
     if (fl == NULL || fl->fl_Task == NULL) {
+        SetIoErr(ERROR_INVALID_LOCK);
         return DOSFALSE;
     }
-    return lhh_dopkt(fl->fl_Task, ACTION_FREE_LOCK,
-        (LONG)lock, 0, 0, 0, 0, &res2);
+    res1 = lhh_dopkt(fl->fl_Task, ACTION_FREE_LOCK, (LONG)lock, 0, 0, 0, 0, &res2);
+    SetIoErr(res2);
+    return res1;
 }
 
 BPTR lhh_host_duplock(BPTR lock)
@@ -615,7 +626,7 @@ BPTR lhh_host_parentdir(BPTR lock)
     return result;
 }
 
-LONG lhh_host_examine(BPTR lock, struct FileInfoBlock *fib)
+LONG GetA4 lhh_host_examine(BPTR lock, struct FileInfoBlock *fib)
 {
     struct FileLock *fl;
     LONG res2;
@@ -854,7 +865,7 @@ LONG lhh_host_namefromlock(BPTR lock, STRPTR buffer, LONG len)
     return DOSFALSE;
 }
 
-BPTR lhh_host_open(STRPTR name, LONG mode)
+BPTR GetA4 lhh_host_open(STRPTR name, LONG mode)
 {
     struct LhhHostVol hv;
     const char *rest;
@@ -955,7 +966,48 @@ BPTR lhh_host_open(STRPTR name, LONG mode)
     return MKBADDR(fh);
 }
 
-LONG lhh_host_close(BPTR fh_bptr)
+/*
+ * Open from an existing host lock (ACTION_FH_FROM_LOCK).  Success steals
+ * the lock into the FH - caller must not UnLock.  Failure leaves lock owned.
+ */
+BPTR GetA4 lhh_host_open_from_lock(BPTR lock)
+{
+    struct FileLock *fl;
+    struct FileHandle *fh;
+    LONG res2;
+    LONG res1;
+
+    if (lock == ZERO) {
+        return ZERO;
+    }
+    fl = (struct FileLock *)BADDR(lock);
+    if (fl == NULL || fl->fl_Task == NULL) {
+        SetIoErr(ERROR_INVALID_LOCK);
+        return ZERO;
+    }
+
+    fh = (struct FileHandle *)AllocMem(sizeof(struct FileHandle),
+        MEMF_PUBLIC | MEMF_CLEAR);
+    if (fh == NULL) {
+        SetIoErr(ERROR_NO_FREE_STORE);
+        return ZERO;
+    }
+
+    res1 = lhh_dopkt(fl->fl_Task, ACTION_FH_FROM_LOCK,
+        (LONG)MKBADDR(fh), (LONG)lock, 0, 0, 0, &res2);
+    if (res1 == DOSFALSE || fh->fh_Type == NULL) {
+        FreeMem(fh, sizeof(struct FileHandle));
+        if (res1 == DOSFALSE) {
+            SetIoErr(res2);
+        } else {
+            SetIoErr(ERROR_OBJECT_NOT_FOUND);
+        }
+        return ZERO;
+    }
+    return MKBADDR(fh);
+}
+
+LONG GetA4 lhh_host_close(BPTR fh_bptr)
 {
     struct FileHandle *fh;
     LONG res2;
@@ -977,7 +1029,7 @@ LONG lhh_host_close(BPTR fh_bptr)
     return res1;
 }
 
-LONG lhh_host_read(BPTR fh_bptr, APTR buf, LONG len)
+LONG GetA4 lhh_host_read(BPTR fh_bptr, APTR buf, LONG len)
 {
     struct FileHandle *fh;
     LONG res2;
@@ -998,7 +1050,7 @@ LONG lhh_host_read(BPTR fh_bptr, APTR buf, LONG len)
     return res1;
 }
 
-LONG lhh_host_write(BPTR fh_bptr, APTR buf, LONG len)
+LONG GetA4 lhh_host_write(BPTR fh_bptr, APTR buf, LONG len)
 {
     struct FileHandle *fh;
     LONG res2;
@@ -1019,7 +1071,7 @@ LONG lhh_host_write(BPTR fh_bptr, APTR buf, LONG len)
     return res1;
 }
 
-LONG lhh_host_seek(BPTR fh_bptr, LONG pos, LONG mode)
+LONG GetA4 lhh_host_seek(BPTR fh_bptr, LONG pos, LONG mode)
 {
     struct FileHandle *fh;
     LONG res2;

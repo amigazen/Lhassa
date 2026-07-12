@@ -100,6 +100,11 @@ static BOOL openres(GD gd, LONG *err)
                         39)) != NULL) {
                     LhBase = OpenLibrary((STRPTR)LH_NAME, LH_MIN_VERSION);
                     gd->gd_LhBase = LhBase;
+                    /*
+                     * Archives are slurped via private-reply host I/O into
+                     * memory before LhOpenArchive so catalog/extract never
+                     * dos WaitPkt on pr_MsgPort (AN_AsyncPkt under heavy copy).
+                     */
                     /* Mount even if lh.library is missing (volume list still works). */
                     rv = TRUE;
                 } else if (err) {
@@ -1316,6 +1321,14 @@ static ULONG lhh_main(void)
         case ACTION_SET_PROTECT:
         case ACTION_SET_COMMENT:
         case ACTION_SET_DATE:
+            /*
+             * WB SetComment/SetProtection/SetDate after a copy into an
+             * archive.  We do not rewrite headers for these yet - accept
+             * so the copy is not reported as failed after a good AddEntry.
+             */
+            ReplyDosPacket1(gd, Pkt, DOSTRUE);
+            break;
+
         case ACTION_SET_FILE_SIZE:
         case ACTION_SET_OWNER:
         case ACTION_WRITE_PROTECT:

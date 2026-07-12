@@ -197,71 +197,29 @@ int lhx_real_to_lha_path(STRPTR real, STRPTR out, LONG outlen)
 #endif
 
 /*
- * True if a sibling .info exists next to the real archive on the host
- * (outside the .lha).  Virtual placeholders must not recurse into archives.
- */
-static int lhx_host_has_archive_info(STRPTR real_path)
-{
-    static char info_path[LHX_PATH_LEN];
-    LONG n;
-    BPTR lock;
-
-    if (real_path == NULL || real_path[0] == '\0') {
-        return 0;
-    }
-    n = 0;
-    while (real_path[n] != '\0' && n + 6 < LHX_PATH_LEN) {
-        info_path[n] = real_path[n];
-        n++;
-    }
-    if (n + 5 >= LHX_PATH_LEN) {
-        return 0;
-    }
-    info_path[n++] = '.';
-    info_path[n++] = 'i';
-    info_path[n++] = 'n';
-    info_path[n++] = 'f';
-    info_path[n++] = 'o';
-    info_path[n] = '\0';
-    lock = Lock((STRPTR)info_path, SHARED_LOCK);
-    if (lock == ZERO) {
-        return 0;
-    }
-    UnLock(lock);
-    return 1;
-}
-
-/*
  * Open one LHA: archive path in Workbench - a single OpenWorkbenchObject
  * on the final path (not LHA: root / parents).
- *
- * If there is no host-side archive.info next to the .lha, request Show All
- * so iconless members are visible (WBOPENA_Show / V45).
+ * Always request Show All so iconless archive members are visible
+ * (WBOPENA_Show / DDFLAGS_SHOWALL, V45+).
  */
 static LONG lhx_wb_open_lha_path(STRPTR lha_path, STRPTR real_path)
 {
     LONG ok;
-    LONG show_all;
 
+    (void)real_path;
     if (lha_path == NULL || lha_path[0] == '\0') {
         return RETURN_FAIL;
     }
 
-    show_all = !lhx_host_has_archive_info(real_path);
-    if (show_all) {
-        ok = OpenWorkbenchObject(lha_path,
-            WBOPENA_Show, (ULONG)DDFLAGS_SHOWALL,
-            TAG_DONE);
-    } else {
-        ok = OpenWorkbenchObject(lha_path, TAG_DONE);
-    }
+    ok = OpenWorkbenchObject(lha_path,
+        WBOPENA_Show, (ULONG)DDFLAGS_SHOWALL,
+        TAG_DONE);
     if (!ok) {
         lhx_dbg_s((STRPTR)"OpenWorkbenchObject fail", lha_path);
         lhx_dbg_l((STRPTR)"IoErr", IoErr());
         return RETURN_WARN;
     }
     lhx_dbg_s((STRPTR)"opened", lha_path);
-    lhx_dbg_l((STRPTR)"show_all", show_all);
     return RETURN_OK;
 }
 

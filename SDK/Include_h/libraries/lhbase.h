@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 amigazen project
  *
- * lh/lhbase.h - lh.library base structure
+ * libraries/lhbase.h - lh.library base structure (positive size fields)
  */
 
 #ifndef LIBRARIES_LHBASE_H
@@ -22,9 +22,8 @@ struct LHBase
     ULONG lhb_Pad;
     LONG lhb_Err;
     /*
-     * Handler: AllocVec the .lha bytes (via private-reply host I/O), set these,
-     * then LhOpenArchive.  Consumed on open as a memory stream so catalog and
-     * extract never dos WaitPkt on the handler's pr_MsgPort.
+     * Set AllocVec'd archive bytes then call LhOpenArchive; consumed as a
+     * memory-backed stream (no dos WaitPkt during subsequent reads).
      */
     APTR lhb_PendingMem;
     ULONG lhb_PendingMemLen;

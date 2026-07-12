@@ -13,7 +13,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 
-#include <libraries/lhlib.h>
+#include <libraries/lh.h>
 #include <proto/lh.h>
 
 struct Library *LhBase = NULL;

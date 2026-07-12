@@ -128,6 +128,8 @@ __ASM__ __SAVE_DS__ InitLib(
     base->lhb_SegList = seglist;
     base->lhb_Pad = 0;
     base->lhb_Err = 0;
+    base->lhb_PendingMem = NULL;
+    base->lhb_PendingMemLen = 0;
 
     if (L_OpenLibs(base) != 0) {
         return (struct LHBase *)NULL;

@@ -1,0 +1,6 @@
+/* LHA: overlay filesystem — presents .lha archives as directories */
+
+Handler     = L:lh-handler
+Stacksize   = 16384
+Priority    = 5
+GlobVec     = -1

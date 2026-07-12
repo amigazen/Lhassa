@@ -8,6 +8,7 @@
 
 #include "lh-handler.h"
 #include "lh_drawer_info.h"
+#include <libraries/lhbase.h>
 
 #include <string.h>
 
@@ -117,7 +118,179 @@ static struct LhHArc *lhh_arc_find(GD gd, const char *real_path)
     return NULL;
 }
 
-struct LhHArc *lhh_arc_obtain(GD gd, const char *real_path, LONG *err)
+/*
+ * Load the whole .lha via private-reply host I/O (preferred) so LhOpenArchive
+ * can mount from memory.  Falls back to dos Open/Read once if host FINDINPUT
+ * fails - that brief WaitPkt is only at obtain, not per extract.
+ * Always releases host_lock when non-ZERO (success or failure).
+ * gd is required: AllocMem/Open expand via SysBase/DOSBase macros on gd.
+ */
+static int lhh_slurp_lha(GD gd, const char *path, BPTR host_lock, APTR *out,
+    ULONG *out_len)
+{
+    struct FileInfoBlock *fib;
+    ULONG size;
+    APTR buf;
+    BPTR fh;
+    ULONG total;
+    LONG n;
+    int used_host;
+    BPTR exam_lock;
+    int unlock_exam;
+
+    if (gd == NULL || path == NULL || out == NULL || out_len == NULL) {
+        if (host_lock != ZERO) {
+            lhh_host_unlock(host_lock);
+        }
+        return 0;
+    }
+    *out = NULL;
+    *out_len = 0;
+
+    fib = (struct FileInfoBlock *)AllocMem(sizeof(struct FileInfoBlock),
+        MEMF_PUBLIC | MEMF_CLEAR);
+    if (fib == NULL) {
+        if (host_lock != ZERO) {
+            lhh_host_unlock(host_lock);
+        }
+        return 0;
+    }
+
+    unlock_exam = 0;
+    exam_lock = host_lock;
+    if (exam_lock == ZERO) {
+        exam_lock = lhh_host_lock((STRPTR)path, ACCESS_READ);
+        unlock_exam = 1;
+        if (exam_lock == ZERO) {
+            FreeMem(fib, sizeof(struct FileInfoBlock));
+            return 0;
+        }
+    }
+    if (!lhh_host_examine(exam_lock, fib)) {
+        if (unlock_exam) {
+            lhh_host_unlock(exam_lock);
+        } else {
+            lhh_host_unlock(host_lock);
+        }
+        FreeMem(fib, sizeof(struct FileInfoBlock));
+        return 0;
+    }
+    size = (ULONG)fib->fib_Size;
+    FreeMem(fib, sizeof(struct FileInfoBlock));
+    /*
+     * Drop the lock before Open/FINDINPUT.  Holding it made path Open return
+     * 205; size is already known.
+     */
+    if (unlock_exam) {
+        lhh_host_unlock(exam_lock);
+    } else {
+        lhh_host_unlock(host_lock);
+    }
+    host_lock = ZERO;
+
+    if (size == 0) {
+        return 0;
+    }
+
+    buf = AllocVec(size, MEMF_ANY);
+    if (buf == NULL) {
+        return 0;
+    }
+
+    used_host = 1;
+    fh = lhh_host_open((STRPTR)path, MODE_OLDFILE);
+    if (fh == ZERO) {
+        used_host = 0;
+        fh = Open((STRPTR)path, MODE_OLDFILE);
+        if (fh == ZERO) {
+            FreeVec(buf);
+            return 0;
+        }
+    }
+
+    total = 0;
+    while (total < size) {
+        if (used_host) {
+            n = lhh_host_read(fh, (UBYTE *)buf + total, (LONG)(size - total));
+        } else {
+            n = Read(fh, (UBYTE *)buf + total, (LONG)(size - total));
+        }
+        if (n <= 0) {
+            break;
+        }
+        total += (ULONG)n;
+    }
+    if (used_host) {
+        lhh_host_close(fh);
+    } else {
+        Close(fh);
+    }
+    if (total != size) {
+        FreeVec(buf);
+        return 0;
+    }
+    *out = buf;
+    *out_len = size;
+    return 1;
+}
+
+static struct LhArchive *lhh_open_archive_mem(GD gd, const char *real_path,
+    BPTR host_lock, LONG *err)
+{
+    APTR mem;
+    ULONG mem_len;
+    struct LHBase *lhb;
+    struct LhArchive *archive;
+
+    mem = NULL;
+    mem_len = 0;
+    if (!lhh_slurp_lha(gd, real_path, host_lock, &mem, &mem_len)) {
+        /*
+         * Last resort: path Open inside the library (WaitPkt risk).  Better
+         * than failing every archive mount when the slurp path fails.
+         */
+        archive = LhOpenArchive((STRPTR)real_path, LHARC_MODE_READ);
+        if (archive == NULL) {
+            if (err) {
+                *err = LhErr();
+                if (*err == 0) {
+                    *err = ERROR_OBJECT_NOT_FOUND;
+                }
+            }
+        }
+        return archive;
+    }
+
+    lhb = (struct LHBase *)gd->gd_LhBase;
+    if (lhb == NULL) {
+        FreeVec(mem);
+        if (err) {
+            *err = ERROR_OBJECT_NOT_FOUND;
+        }
+        return NULL;
+    }
+    lhb->lhb_PendingMem = mem;
+    lhb->lhb_PendingMemLen = mem_len;
+    archive = LhOpenArchive((STRPTR)real_path, LHARC_MODE_READ);
+    if (archive == NULL) {
+        if (lhb->lhb_PendingMem != NULL) {
+            FreeVec(lhb->lhb_PendingMem);
+            lhb->lhb_PendingMem = NULL;
+            lhb->lhb_PendingMemLen = 0;
+        }
+        if (err) {
+            *err = LhErr();
+            if (*err == 0) {
+                *err = ERROR_OBJECT_NOT_FOUND;
+            }
+        }
+        return NULL;
+    }
+    return archive;
+}
+
+struct LhHArc *lhh_arc_obtain(GD gd, const char *real_path, BPTR host_lock,
+    LONG *err)
 {
     struct LhHArc *ha;
     struct LhArchive *archive;
@@ -125,17 +298,16 @@ struct LhHArc *lhh_arc_obtain(GD gd, const char *real_path, LONG *err)
     ha = lhh_arc_find(gd, real_path);
     if (ha != NULL) {
         ha->refcount++;
+        if (host_lock != ZERO) {
+            lhh_host_unlock(host_lock);
+        }
         return ha;
     }
 
-    archive = LhOpenArchive((STRPTR)real_path, LHARC_MODE_READ);
+    archive = lhh_open_archive_mem(gd, real_path, host_lock, err);
     if (archive == NULL) {
-        if (err) {
-            *err = LhErr();
-            if (*err == 0) {
-                *err = ERROR_OBJECT_NOT_FOUND;
-            }
-        }
+        DB2("arc_obtain fail path=%s LhErr=%ld\n", real_path,
+            err ? *err : (LONG)LhErr());
         return NULL;
     }
 
@@ -149,8 +321,10 @@ struct LhHArc *lhh_arc_obtain(GD gd, const char *real_path, LONG *err)
     }
     ha->archive = archive;
     ha->refcount = 1;
+    ha->users = NULL;
     lhh_cstr_copy(ha->real_path, real_path, LHH_PATH_LEN);
     AddTail((struct List *)&gd->gd_Arcs, (struct Node *)&ha->node);
+    DB1("arc_obtain ARCHIVE path=%s\n", real_path);
     return ha;
 }
 
@@ -174,26 +348,113 @@ void lhh_arc_release(GD gd, struct LhHArc *arc)
 int lhh_arc_refresh(GD gd, struct LhHArc *arc, LONG *err)
 {
     struct LhArchive *archive;
+    struct LhHLock *lock;
+    BPTR lh;
+    STRPTR name;
 
     if (arc == NULL) {
         return 0;
+    }
+    /*
+     * Drop live LhLock pointers before closing the reader - they point into
+     * the old LhArchive and become dangling after LhCloseArchive.
+     */
+    for (lock = arc->users; lock != NULL; lock = lock->arc_next) {
+        if (lock->lh_lock != ZERO) {
+            LhUnLock(lock->lh_lock);
+            lock->lh_lock = ZERO;
+        }
     }
     if (arc->archive != NULL) {
         LhCloseArchive(arc->archive);
         arc->archive = NULL;
     }
-    archive = LhOpenArchive((STRPTR)arc->real_path, LHARC_MODE_READ);
+
+    archive = lhh_open_archive_mem(gd, arc->real_path, ZERO, err);
     if (archive == NULL) {
-        if (err) {
-            *err = LhErr();
-            if (*err == 0) {
-                *err = ERROR_OBJECT_NOT_FOUND;
-            }
-        }
         return 0;
     }
     arc->archive = archive;
+    /* Rebind every user lock to the new catalog. */
+    for (lock = arc->users; lock != NULL; lock = lock->arc_next) {
+        if (lock->type == LHH_LOCK_ARCHIVE) {
+            name = (STRPTR)"";
+        } else if (lock->type == LHH_LOCK_ENTRY && lock->entry[0]) {
+            name = (STRPTR)lock->entry;
+        } else {
+            continue;
+        }
+        lh = LhLock(archive, name);
+        if (lh != ZERO) {
+            lock->lh_lock = lh;
+        }
+    }
     return 1;
+}
+
+/*
+ * Commit a buffered write into the on-disk archive.  The shared reader must
+ * be closed first - APPEND Open fails while the .lha is held for read, and
+ * the old close path silently dropped the data (copy-into-lha looked OK to
+ * WB until the next Locate).
+ */
+static int lhh_arc_commit_write(GD gd, struct LhHArc *ha, const char *entry,
+    APTR data, LONG len, LONG *err)
+{
+    struct LhArchive *warc;
+    LONG ok;
+
+    if (ha == NULL || entry == NULL || entry[0] == '\0') {
+        if (err) {
+            *err = ERROR_OBJECT_NOT_FOUND;
+        }
+        return 0;
+    }
+    /* Release reader so host Open(append) can succeed. */
+    {
+        struct LhHLock *lock;
+
+        for (lock = ha->users; lock != NULL; lock = lock->arc_next) {
+            if (lock->lh_lock != ZERO) {
+                LhUnLock(lock->lh_lock);
+                lock->lh_lock = ZERO;
+            }
+        }
+    }
+    if (ha->archive != NULL) {
+        LhCloseArchive(ha->archive);
+        ha->archive = NULL;
+    }
+
+    warc = LhOpenArchive((STRPTR)ha->real_path, LHARC_MODE_APPEND);
+    if (warc == NULL) {
+        DB2("commit write open-append fail entry=%s err=%ld\n",
+            entry, LhErr());
+        if (err) {
+            *err = LhErr();
+            if (*err == 0) {
+                *err = ERROR_WRITE_PROTECTED;
+            }
+        }
+        (void)lhh_arc_refresh(gd, ha, err);
+        return 0;
+    }
+    ok = LhAddEntry(warc, (STRPTR)entry, data, len);
+    LhCloseArchive(warc);
+    if (!ok) {
+        DB2("commit write AddEntry fail entry=%s err=%ld\n",
+            entry, LhErr());
+        if (err) {
+            *err = LhErr();
+            if (*err == 0) {
+                *err = ERROR_WRITE_PROTECTED;
+            }
+        }
+        (void)lhh_arc_refresh(gd, ha, err);
+        return 0;
+    }
+    DB2("commit write ok entry=%s len=%ld\n", entry, len);
+    return lhh_arc_refresh(gd, ha, err);
 }
 
 static void lhh_lock_init_fl(GD gd, struct LhHLock *lock, LONG access)
@@ -274,6 +535,7 @@ struct LhHLock *lhh_lock_alloc(GD gd, ULONG type, struct LhHArc *arc,
     lock->magic = LHH_LOCK_MAGIC;
     lock->type = type;
     lock->arc = NULL;
+    lock->arc_next = NULL;
     lock->lh_lock = ZERO;
     lock->real_lock = ZERO;
     lock->entry[0] = '\0';
@@ -406,6 +668,9 @@ struct LhHLock *lhh_lock_alloc(GD gd, ULONG type, struct LhHArc *arc,
         return NULL;
     }
     lock->lh_lock = lh;
+    /* Track users so refresh/commit can rebind LhLock after reopen. */
+    lock->arc_next = arc->users;
+    arc->users = lock;
     lhh_lock_set_key(lock);
     gd->gd_LockCnt++;
     gd->gd_UsageCnt++;
@@ -414,6 +679,8 @@ struct LhHLock *lhh_lock_alloc(GD gd, ULONG type, struct LhHArc *arc,
 
 void lhh_lock_free(GD gd, struct LhHLock *lock)
 {
+    struct LhHLock **pp;
+
     if (!lhh_lock_valid(gd, lock)) {
         return;
     }
@@ -426,6 +693,13 @@ void lhh_lock_free(GD gd, struct LhHLock *lock)
         lock->real_lock = ZERO;
     }
     if (lock->arc != NULL) {
+        for (pp = &lock->arc->users; *pp != NULL; pp = &(*pp)->arc_next) {
+            if (*pp == lock) {
+                *pp = lock->arc_next;
+                break;
+            }
+        }
+        lock->arc_next = NULL;
         lhh_arc_release(gd, lock->arc);
         lock->arc = NULL;
     }
@@ -926,14 +1200,28 @@ static struct LhHLock *lhh_lock_resolve_one(GD gd, struct LhHLock *parent,
         FreeMem(fib, sizeof(struct FileInfoBlock));
 
         if (is_file) {
-            ha = lhh_arc_obtain(gd, real, err);
+            /*
+             * Pass rlock into obtain: FH_FROM_LOCK (steals lock) or unlock
+             * then path Open.  Either way rlock is no longer ours.
+             */
+            ha = lhh_arc_obtain(gd, real, rlock, err);
+            rlock = ZERO;
             if (ha != NULL) {
-                lhh_host_unlock(rlock);
                 return lhh_lock_alloc(gd, LHH_LOCK_ARCHIVE, ha, NULL, ZERO,
                     real, virt, access, err);
             }
             if (err) {
                 *err = 0;
+            }
+            rlock = lhh_host_lock((STRPTR)real, access);
+            if (rlock == ZERO) {
+                if (err) {
+                    *err = IoErr();
+                    if (*err == 0) {
+                        *err = ERROR_OBJECT_NOT_FOUND;
+                    }
+                }
+                return NULL;
             }
         }
         return lhh_lock_alloc(gd, LHH_LOCK_REAL, NULL, NULL, rlock, real,
@@ -1016,17 +1304,27 @@ static struct LhHLock *lhh_lock_real_path(GD gd, const char *real_path,
 
     if (is_file) {
         /*
-         * Try to present a valid LHA as a virtual directory.  If
-         * LhOpenArchive fails (e.g. not an archive), keep REAL passthrough.
+         * Pass rlock into obtain (FH_FROM_LOCK steals it).  On failure
+         * obtain releases the lock; re-Lock for REAL passthrough.
          */
-        ha = lhh_arc_obtain(gd, real_path, err);
+        ha = lhh_arc_obtain(gd, real_path, rlock, err);
+        rlock = ZERO;
         if (ha != NULL) {
-            lhh_host_unlock(rlock);
             return lhh_lock_alloc(gd, LHH_LOCK_ARCHIVE, ha, NULL, ZERO,
                 real_path, virt_path, access, err);
         }
         if (err) {
             *err = 0;
+        }
+        rlock = lhh_host_lock((STRPTR)real_path, access);
+        if (rlock == ZERO) {
+            if (err) {
+                *err = IoErr();
+                if (*err == 0) {
+                    *err = ERROR_OBJECT_NOT_FOUND;
+                }
+            }
+            return NULL;
         }
     }
 
@@ -1284,7 +1582,6 @@ static struct LhHHandle *lhh_handle_alloc(GD gd, LONG *err)
 
 void lhh_handle_close(GD gd, struct LhHHandle *hh)
 {
-    struct LhArchive *warc;
     LONG err;
 
     if (hh == NULL) {
@@ -1293,13 +1590,11 @@ void lhh_handle_close(GD gd, struct LhHHandle *hh)
 
     if (hh->writing) {
         if (hh->lock != NULL && hh->lock->arc != NULL && hh->entry[0]) {
-            warc = LhOpenArchive((STRPTR)hh->lock->arc->real_path,
-                LHARC_MODE_APPEND);
-            if (warc != NULL) {
-                LhAddEntry(warc, (STRPTR)hh->entry,
-                    hh->wbuf, (LONG)hh->wlen);
-                LhCloseArchive(warc);
-                lhh_arc_refresh(gd, hh->lock->arc, &err);
+            err = 0;
+            if (!lhh_arc_commit_write(gd, hh->lock->arc, hh->entry,
+                    hh->wbuf, (LONG)hh->wlen, &err)) {
+                DB2("handle_close commit fail entry=%s err=%ld\n",
+                    hh->entry, err);
             }
         }
         if (hh->wbuf != NULL) {

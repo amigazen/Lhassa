@@ -9,7 +9,7 @@
 ==include <exec/libraries.h>
 ==include <dos/dos.h>
 ==include <dos/exall.h>
-==include <libraries/lhlib.h>
+==include <libraries/lh.h>
 ==include <utility/tagitem.h>
 ==typedef LhArchive
 *

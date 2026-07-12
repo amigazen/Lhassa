@@ -117,6 +117,8 @@ install: all
 
 # Canonical client headers: //SDK/Include_h (not Source/include, which is engine-only).
 headers:
+	Copy clone //SDK/Include_h/libraries/lh.h /include/libraries/lh.h
+	Copy clone //SDK/Include_h/libraries/lhbase.h /include/libraries/lhbase.h
 	Copy clone //SDK/Include_h/libraries/lhlib.h /include/libraries/lhlib.h
 	Copy clone //SDK/Include_h/clib/lh_protos.h /include/clib/lh_protos.h
 	Copy clone //SDK/Include_h/pragmas/lh_pragmas.h /include/pragmas/lh_pragmas.h

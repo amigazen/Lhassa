@@ -18,7 +18,7 @@
 #define LHARC_MODE_WRITE  MODE_NEWFILE
 #define LHARC_MODE_APPEND 1007L
 
-/* LhAddEntryTagList / LhAddEntryTags tags (must match libraries/lhlib.h). */
+/* LhAddEntryTagList / LhAddEntryTags tags (must match libraries/lh.h). */
 #ifndef LHADD_Method
 #define LHADD_Method     (TAG_USER + 1)
 #define LHADD_Attrs      (TAG_USER + 2)

@@ -225,13 +225,17 @@ typedef struct lh_hdr_meta {
 void lh_hdr_meta_clear(lh_hdr_meta *m);
 
 /*
- * lh_stream - dos.library file I/O (Open/Read/Write/Seek/Close per dos.doc).
+ * lh_stream - dos.library file I/O, or a memory buffer (no WaitPkt).
  */
 typedef struct lh_stream lh_stream;
 
 struct lh_stream {
 #ifdef LH_AMIGA
     BPTR lh_fh;
+    const unsigned char *mem;
+    unsigned long mem_len;
+    unsigned long mem_pos;
+    int mem_owned; /* FreeVec(mem) on close when set */
 #elif defined(LH_HOST)
     FILE *lh_fp;
 #endif
@@ -240,12 +244,14 @@ struct lh_stream {
 void lh_stream_init(lh_stream *s);
 
 #ifdef LH_AMIGA
-#define LH_STREAM_OPEN(s) ((s)->lh_fh != 0)
+#define LH_STREAM_OPEN(s) ((s)->lh_fh != 0 || (s)->mem != NULL)
 #elif defined(LH_HOST)
 #define LH_STREAM_OPEN(s) ((s)->lh_fp != NULL)
 #endif
 
 int lh_stream_open_read(lh_stream *s, const char *path);
+int lh_stream_open_mem(lh_stream *s, const void *data, unsigned long len,
+    int owned);
 int lh_stream_open_write(lh_stream *s, const char *path);
 int lh_stream_open_append(lh_stream *s, const char *path);
 int lh_stream_file_exists(const char *path);
@@ -253,7 +259,31 @@ void lh_stream_close(lh_stream *s);
 size_t lh_stream_read(lh_stream *s, void *buf, size_t n);
 size_t lh_stream_write(lh_stream *s, const void *buf, size_t n);
 int lh_stream_seek_cur(lh_stream *s, long delta);
+int lh_stream_rewind(lh_stream *s);
 long lh_stream_tell(lh_stream *s);
+
+#ifdef LH_AMIGA
+#ifndef EXEC_LIBRARIES_H
+#include <exec/libraries.h>
+#endif
+#ifndef ZERO
+#define ZERO ((BPTR)0)
+#endif
+/*
+ * Must match lib_source/lh/lhbase.h and SDK libraries/lhbase.h.
+ * Handler may set lhb_PendingMem (AllocVec) before LhOpenArchive; the next
+ * lh_stream_open_read / lh_arc_open consumes it as a memory-backed archive.
+ */
+struct LHBase {
+    struct Library lhb_LibNode;
+    BPTR lhb_SegList;
+    ULONG lhb_Pad;
+    LONG lhb_Err;
+    APTR lhb_PendingMem;
+    ULONG lhb_PendingMemLen;
+};
+extern struct LHBase *LhBase;
+#endif
 
 lh_status lh_hdr_read(lh_stream *io, lh_hdr_meta *meta, unsigned char write_level);
 lh_status lh_hdr_write(
