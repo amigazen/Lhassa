@@ -39,6 +39,11 @@ LONG GetA4 lhh_host_unlock(BPTR lock);
 /* Shared BSTR scratch - handler is single-threaded. */
 static UBYTE lhh_bbuf[260];
 
+/* Emulated ExAll cursor (Examine/ExNext fallback); cleared by ExAllEnd. */
+static BPTR lhh_exall_lock;
+static struct FileInfoBlock lhh_exall_fib;
+static int lhh_exall_have;
+
 /*
  * HappyENV PacketPort / MyPacket: one private reply port + StandardPacket
  * for the life of the handler (Create/Delete per call wastes mem and can fail).
@@ -574,6 +579,11 @@ LONG GetA4 lhh_host_unlock(BPTR lock)
     if (lock == ZERO) {
         return DOSFALSE;
     }
+    /* Drop emulated ExAll cursor if this lock owned it. */
+    if (lhh_exall_lock == lock) {
+        lhh_exall_have = 0;
+        lhh_exall_lock = ZERO;
+    }
     fl = (struct FileLock *)BADDR(lock);
     if (fl == NULL || fl->fl_Task == NULL) {
         SetIoErr(ERROR_INVALID_LOCK);
@@ -682,9 +692,6 @@ LONG lhh_host_exall(BPTR lock, STRPTR buffer, LONG size, LONG type,
     LONG n;
     LONG i;
     UBYTE *name;
-    static BPTR lhh_exall_lock;
-    static struct FileInfoBlock lhh_exall_fib;
-    static int lhh_exall_have;
 #define LHH_EAD_OFF(f) ((UBYTE)((ULONG)&(((struct ExAllData *)0)->f)))
     static const UBYTE ead_sizes[] = {
         0,
@@ -801,6 +808,38 @@ LONG lhh_host_exall(BPTR lock, STRPTR buffer, LONG size, LONG type,
             return DOSFALSE;
         }
     }
+}
+
+LONG lhh_host_exall_end(BPTR lock, STRPTR buffer, LONG size, LONG type,
+    struct ExAllControl *ec)
+{
+    struct FileLock *fl;
+    LONG res2;
+    LONG res1;
+
+    /*
+     * Drop Emulated-ExAll cursor even if the host rejects END (old FS).
+     * Native ExAll hosts may free private state on this packet.
+     */
+    if (lock != ZERO && lhh_exall_lock == lock) {
+        lhh_exall_have = 0;
+        lhh_exall_lock = ZERO;
+    }
+
+    if (lock == ZERO) {
+        return DOSTRUE;
+    }
+    fl = (struct FileLock *)BADDR(lock);
+    if (fl == NULL || fl->fl_Task == NULL) {
+        return DOSTRUE;
+    }
+    res1 = lhh_dopkt(fl->fl_Task, ACTION_EXAMINE_ALL_END,
+        (LONG)lock, (LONG)buffer, size, type, (LONG)ec, &res2);
+    if (!res1 && res2 != ERROR_ACTION_NOT_KNOWN) {
+        SetIoErr(res2);
+        return DOSFALSE;
+    }
+    return DOSTRUE;
 }
 
 LONG lhh_host_info(BPTR lock, struct InfoData *info)

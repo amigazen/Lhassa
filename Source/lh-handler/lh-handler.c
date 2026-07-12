@@ -1014,7 +1014,28 @@ static ULONG lhh_main(void)
             break;
 
         case ACTION_EXAMINE_ALL_END:
-            ReplyDosPacket1(gd, Pkt, DOSTRUE);
+            {
+                struct LhHLock *lock;
+                struct ExAllControl *ec;
+
+                lock = pkt_lock(gd, (BPTR)Pkt->dp_Arg1);
+                ec = (struct ExAllControl *)Pkt->dp_Arg5;
+                if (lock != NULL && lock->type == LHH_LOCK_REAL
+                    && lock->real_lock != ZERO) {
+                    if (!lhh_host_exall_end(lock->real_lock,
+                            (STRPTR)Pkt->dp_Arg2, Pkt->dp_Arg3,
+                            Pkt->dp_Arg4, ec)) {
+                        ReplyDosPacket2(gd, Pkt, DOSFALSE, IoErr());
+                        break;
+                    }
+                } else if (lock != NULL
+                    && (lock->type == LHH_LOCK_ARCHIVE
+                        || lock->type == LHH_LOCK_ENTRY)
+                    && lock->lh_lock != ZERO) {
+                    LhExAllEnd(lock->lh_lock);
+                }
+                ReplyDosPacket1(gd, Pkt, DOSTRUE);
+            }
             break;
 
         case ACTION_FINDINPUT:

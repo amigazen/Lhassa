@@ -231,6 +231,8 @@ LONG GetA4 lhh_host_examine(BPTR lock, struct FileInfoBlock *fib);
 LONG lhh_host_exnext(BPTR lock, struct FileInfoBlock *fib);
 LONG lhh_host_exall(BPTR lock, STRPTR buffer, LONG size, LONG type,
     struct ExAllControl *ec);
+LONG lhh_host_exall_end(BPTR lock, STRPTR buffer, LONG size, LONG type,
+    struct ExAllControl *ec);
 LONG lhh_host_info(BPTR lock, struct InfoData *info);
 BPTR GetA4 lhh_host_open(STRPTR name, LONG mode);
 BPTR GetA4 lhh_host_open_from_lock(BPTR lock);
