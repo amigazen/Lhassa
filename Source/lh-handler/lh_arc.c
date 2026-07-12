@@ -9,6 +9,8 @@
 #include "lh-handler.h"
 #include "lh_drawer_info.h"
 
+#include <string.h>
+
 /* Default icons from GetDefDiskObject cache (lh_icon.c). */
 static void lhh_set_icon_mem(struct LhHHandle *hh, int kind)
 {
@@ -30,6 +32,53 @@ static int lhh_want_disk_icon(struct LhHLock *lock, const char *name)
         return 1;
     }
     return 0;
+}
+
+/*
+ * True if stripping *.info from entry_info yields an archive directory
+ * (catalog dir or implied prefix).  File companions must not get VINFO -
+ * Workbench treats those as iconless and icon.library supplies defaults.
+ */
+static int lhh_arc_info_base_is_dir(struct LhArchive *archive,
+    const char *info_name)
+{
+    static char base[LHH_PATH_LEN];
+    static struct FileInfoBlock fib;
+    BPTR lh;
+
+    if (archive == NULL || info_name == NULL
+        || !lhh_strip_info_suffix(info_name, base, LHH_PATH_LEN)) {
+        return 0;
+    }
+    lh = LhLock(archive, (STRPTR)base);
+    if (lh == ZERO) {
+        return 0;
+    }
+    memset(&fib, 0, sizeof(fib));
+    if (!LhExamine(lh, &fib) || fib.fib_DirEntryType <= 0) {
+        LhUnLock(lh);
+        return 0;
+    }
+    LhUnLock(lh);
+    return 1;
+}
+
+/*
+ * Missing catalog *.info under ARCHIVE/ENTRY: drawer VINFO only when the
+ * companion is a directory.  Otherwise OBJECT_NOT_FOUND (iconless file).
+ */
+static struct LhHLock *lhh_arc_missing_info_lock(GD gd, struct LhArchive *archive,
+    const char *entry_info, const char *virt_info, LONG access, LONG *err)
+{
+    if (archive != NULL
+        && lhh_arc_info_base_is_dir(archive, entry_info)) {
+        return lhh_lock_alloc(gd, LHH_LOCK_VINFO, NULL, NULL, ZERO, NULL,
+            virt_info, access, err);
+    }
+    if (err) {
+        *err = ERROR_OBJECT_NOT_FOUND;
+    }
+    return NULL;
 }
 
 int lhh_lock_valid(GD gd, struct LhHLock *lock)
@@ -695,9 +744,9 @@ static struct LhHLock *lhh_lock_resolve_one(GD gd, struct LhHLock *parent,
 
     /*
      * *.info handling:
-     *  Inside ARCHIVE/ENTRY: real catalog .info first; if missing, magic
-     *  VINFO so ExNext-synthesized placeholders (Show All / default icons)
-     *  still Open for GetDiskObject.
+     *  Inside ARCHIVE/ENTRY: real catalog .info as ENTRY; missing .info
+     *  is VINFO only when the companion is a directory (drawer icon).
+     *  Iconless files omit .info - Workbench/icon.library defaults.
      *  Outside: real host .info, else Disk.info WBDISK, else drawer/.lha
      *  VINFO when the companion is a drawer or archive.
      */
@@ -737,7 +786,7 @@ static struct LhHLock *lhh_lock_resolve_one(GD gd, struct LhHLock *parent,
             lhh_cstr_copy(vinfo, comp, LHH_PATH_LEN);
         }
 
-        /* Archive: prefer a real catalog .info entry when present. */
+        /* Archive: real catalog .info, else drawer VINFO only. */
         if (parent != NULL
             && (parent->type == LHH_LOCK_ARCHIVE
                 || parent->type == LHH_LOCK_ENTRY)
@@ -752,12 +801,17 @@ static struct LhHLock *lhh_lock_resolve_one(GD gd, struct LhHLock *parent,
             lh = LhLock(parent->arc->archive, (STRPTR)entinfo);
             if (lh != ZERO) {
                 LhUnLock(lh);
-                /* Fall through to normal ARCHIVE/ENTRY resolve below. */
-            } else {
-                /* Synthesized placeholder from ExNext - default drawer icon. */
-                return lhh_lock_alloc(gd, LHH_LOCK_VINFO, NULL, NULL, ZERO,
-                    NULL, vinfo, access, err);
+                /*
+                 * Real catalog *.info: return ENTRY here.  Do not fall
+                 * through - resolve_one's host path walk does not handle
+                 * ARCHIVE/ENTRY parents.
+                 */
+                parent->arc->refcount++;
+                return lhh_lock_alloc(gd, LHH_LOCK_ENTRY, parent->arc,
+                    entinfo, ZERO, parent->real_path, vinfo, access, err);
             }
+            return lhh_arc_missing_info_lock(gd, parent->arc->archive,
+                entinfo, vinfo, access, err);
         } else {
         /* Prefer a real host .info when one exists. */
         if (lhh_virt_to_real(gd, vinfo, realinfo, LHH_PATH_LEN)
@@ -1068,10 +1122,14 @@ struct LhHLock *lhh_lock_resolve(GD gd, struct LhHLock *parent,
     if (parent != NULL && parent->type == LHH_LOCK_ENTRY) {
         static char newentry[LHH_PATH_LEN];
         static char ventry[LHH_PATH_LEN];
+        BPTR lh;
 
         /*
          * Relative locate under an archive directory: "subdir" or
          * "subdir/file".  Parent steps were handled above.
+         *
+         * Missing *.info: drawer VINFO only (file companions stay 205 so
+         * Workbench uses iconless defaults).  Shortcut skips resolve_one.
          */
         if (!name[0] || lhh_cstr_has(name, ':')) {
             if (err) {
@@ -1088,6 +1146,14 @@ struct LhHLock *lhh_lock_resolve(GD gd, struct LhHLock *parent,
         }
         lhh_virt_append_name(newentry, LHH_PATH_LEN, parent->entry, name);
         lhh_virt_append_name(ventry, LHH_PATH_LEN, parent->virt_path, name);
+        if (lhh_name_ends_info(name) || lhh_is_disk_info_name(name)) {
+            lh = LhLock(arc->archive, (STRPTR)newentry);
+            if (lh == ZERO) {
+                return lhh_arc_missing_info_lock(gd, arc->archive, newentry,
+                    ventry, access, err);
+            }
+            LhUnLock(lh);
+        }
         arc->refcount++;
         return lhh_lock_alloc(gd, LHH_LOCK_ENTRY, arc, newentry, ZERO,
             parent->real_path, ventry, access, err);
@@ -1096,6 +1162,7 @@ struct LhHLock *lhh_lock_resolve(GD gd, struct LhHLock *parent,
     /* Inside an archive: remainder is the entry path (may contain '/'). */
     if (parent != NULL && parent->type == LHH_LOCK_ARCHIVE) {
         static char ventry[LHH_PATH_LEN];
+        BPTR lh;
 
         arc = parent->arc;
         if (arc == NULL) {
@@ -1105,6 +1172,18 @@ struct LhHLock *lhh_lock_resolve(GD gd, struct LhHLock *parent,
             return NULL;
         }
         lhh_virt_append_name(ventry, LHH_PATH_LEN, parent->virt_path, name);
+        /*
+         * ARCHIVE shortcut never reaches resolve_one: missing *.info is
+         * drawer VINFO only; real catalog *.info remains ENTRY.
+         */
+        if (lhh_name_ends_info(name) || lhh_is_disk_info_name(name)) {
+            lh = LhLock(arc->archive, (STRPTR)name);
+            if (lh == ZERO) {
+                return lhh_arc_missing_info_lock(gd, arc->archive, name,
+                    ventry, access, err);
+            }
+            LhUnLock(lh);
+        }
         arc->refcount++;
         return lhh_lock_alloc(gd, LHH_LOCK_ENTRY, arc, name, ZERO,
             parent->real_path, ventry, access, err);
@@ -1143,6 +1222,7 @@ struct LhHLock *lhh_lock_resolve(GD gd, struct LhHLock *parent,
         && rest != NULL && rest[0] != '\0') {
         static char arcreal[LHH_PATH_LEN];
         static char ventry[LHH_PATH_LEN];
+        BPTR lh;
 
         arc = lock->arc;
         if (arc == NULL) {
@@ -1159,6 +1239,15 @@ struct LhHLock *lhh_lock_resolve(GD gd, struct LhHLock *parent,
         entry[j] = '\0';
         lhh_cstr_copy(arcreal, lock->real_path, LHH_PATH_LEN);
         lhh_virt_append_name(ventry, LHH_PATH_LEN, lock->virt_path, entry);
+        if (lhh_name_ends_info(entry) || lhh_is_disk_info_name(entry)) {
+            lh = LhLock(arc->archive, (STRPTR)entry);
+            if (lh == ZERO) {
+                lhh_lock_free(gd, lock);
+                return lhh_arc_missing_info_lock(gd, arc->archive, entry,
+                    ventry, access, err);
+            }
+            LhUnLock(lh);
+        }
         arc->refcount++;
         lhh_lock_free(gd, lock);
         return lhh_lock_alloc(gd, LHH_LOCK_ENTRY, arc, entry, ZERO,

@@ -821,10 +821,10 @@ static ULONG lhh_main(void)
                 }
 
                 /*
-                 * ARCHIVE/ENTRY: LhExNext children, then a virtual leaf.info
-                 * so Workbench shows iconless files (Show All / GetWBObject)
-                 * the same way host drawers get drawer/.lha.info placeholders.
-                 * Real *.info catalog entries are listed normally (no VINFO).
+                 * ARCHIVE/ENTRY: list real catalog children only.  Virtual
+                 * leaf.info is queued for directories (drawer icons), not for
+                 * files - Workbench/icon.library handles iconless files.
+                 * Real *.info catalog entries appear as normal files.
                  */
                 if (lock->type == LHH_LOCK_ARCHIVE
                     || lock->type == LHH_LOCK_ENTRY) {
@@ -844,7 +844,8 @@ static ULONG lhh_main(void)
                             (LONG)sizeof(leaf));
                         lhh_fib_cstr_to_bstr(fib);
                         fib->fib_DiskKey = 1;
-                        if (!lhh_name_ends_info(leaf)) {
+                        if (fib->fib_DirEntryType > 0
+                            && !lhh_name_ends_info(leaf)) {
                             queue_pending_info(gd, lock, leaf, fib->fib_DiskKey,
                                 &fib->fib_Date);
                         }
