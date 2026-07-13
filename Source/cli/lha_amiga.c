@@ -19,6 +19,14 @@
 
 #include <string.h>
 
+/*
+ * lh_archive.c consults LhBase->lhb_PendingMem when built into lh.library.
+ * Standalone LhA has no library base; keep the symbol so the shared core
+ * links, with PendingMem handoff permanently inactive.
+ */
+struct LHBase;
+struct LHBase *LhBase = NULL;
+
 static void lha_dt_to_datestamp(const lh_datetime *dt, struct DateStamp *ds)
 {
     unsigned long unix_secs;

@@ -117,7 +117,7 @@ static void lha_print_banner(void)
     if (g_opts.quiet || g_opts.noop_no_progress) {
         return;
     }
-    fputs("LhA Lhassa Version 2.15 68000\n", stdout);
+    fputs("LhA LhASsA Version 2.15 68000\n", stdout);
     fputs("Copyright (c) 2026 amigazen project\n\n", stdout);
 }
 

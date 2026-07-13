@@ -1,4 +1,4 @@
-# Makefile for Lhassa - GNU make, AmigaOS 68k via vbcc
+# Makefile for LhASsA - GNU make, AmigaOS 68k via vbcc
 #
 # Default build uses vbcc (vc + vlink ? Hunk executable).
 # Host smoke-test only: make HOST=1
@@ -41,6 +41,9 @@ LIBSRC = \
 ifneq ($(HOST),1)
 # vbcc 68000: codec % emits __lmodu; C entry is _lmodu (see src/lmodu.c).
 LIBSRC += src/lmodu.c
+# DateStamp bridges live outside src/lh_datetime.c so lh.library always
+# links them (lib_source/smakefile); standalone LhA needs them here.
+LIBSRC += lib_source/lh_amiga_time.c
 endif
 
 LIBOBJ = $(LIBSRC:.c=.o)
@@ -69,7 +72,10 @@ $(TEST): test/smoke.c $(LIBOBJ)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ test/smoke.c $(LIBOBJ)
 endif
 
-$(LIBOBJ): %.o: %.c src/lh_internal.h include/lh.h
+src/%.o: src/%.c src/lh_internal.h include/lh.h
+	$(COMPILE) $@ $<
+
+lib_source/%.o: lib_source/%.c include/lh.h
 	$(COMPILE) $@ $<
 
 $(CLIOBJ): %.o: %.c include/lh.h cli/lha_internal.h

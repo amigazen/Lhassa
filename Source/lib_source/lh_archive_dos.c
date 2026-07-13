@@ -1782,12 +1782,12 @@ LONG lh_arc_add_entry(struct LhArchive *archive, STRPTR name, APTR data, LONG le
 }
 
 /*
- * LhAddEntryTagList -- add with optional TagItem overrides.
+ * LhAddEntryA -- add with optional TagItem overrides.
  *
  * Defaults: header level 2 (writer), LH0/store, LH_ATTR_DEFAULT,
  * current DateStamp, no comment.  Store is the default until LH5
  * compress/decompress round-trips reliably (real LHA rejects bad LH5).
- * Request LH5 explicitly with LHADD_Method / LhAddEntryTags.
+ * Request LH5 explicitly with LHADD_Method / LhAddEntry.
  *
  * Tags (libraries/lh.h):
  *   LHADD_Method     - lh_level (0=store, 5=lh5, 11=dir)

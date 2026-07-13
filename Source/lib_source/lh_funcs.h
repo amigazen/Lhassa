@@ -82,12 +82,7 @@ LONG __ASM__ __SAVE_DS__ LhNameFromLock(
     __REG__(a0, BPTR Lock),
     __REG__(a1, STRPTR Buffer),
     __REG__(d0, LONG Len));
-LONG __ASM__ __SAVE_DS__ LhAddEntry(
-    __REG__(a0, struct LhArchive *Archive),
-    __REG__(a1, STRPTR Name),
-    __REG__(a2, APTR Data),
-    __REG__(d0, LONG DataLen));
-LONG __ASM__ __SAVE_DS__ LhAddEntryTagList(
+LONG __ASM__ __SAVE_DS__ LhAddEntryA(
     __REG__(a0, struct LhArchive *Archive),
     __REG__(a1, STRPTR Name),
     __REG__(a2, APTR Data),

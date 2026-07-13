@@ -21,7 +21,7 @@ struct Library *LhBase = NULL;
 static void test_buffer(void)
 {
     struct LhBuffer *buf;
-    static unsigned char plain[] = "Lhassa lh.library buffer roundtrip.";
+    static unsigned char plain[] = "LhASsA lh.library buffer roundtrip.";
     static unsigned char comp[128];
     static unsigned char back[128];
     ULONG n;

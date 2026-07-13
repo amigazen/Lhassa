@@ -50,6 +50,7 @@ static LONG lhx_walk_entries(struct LhArchive *arc, STRPTR dirpath,
     BPTR lock;
     struct FileInfoBlock *fib;
     LONG ok;
+    LONG walkrc;
     LONG rc;
     char childpath[512];
     LONG dlen;
@@ -91,14 +92,24 @@ static LONG lhx_walk_entries(struct LhArchive *arc, STRPTR dirpath,
 
         if (!lhx_fib_is_file(fib)) {
             /* Recurse into nested virtual directory. */
-            if (lhx_walk_entries(arc, (STRPTR)childpath, args, fn, ud)
-                != RETURN_OK) {
+            walkrc = lhx_walk_entries(arc, (STRPTR)childpath, args, fn, ud);
+            if (walkrc == RETURN_WARN) {
+                rc = RETURN_WARN;
+                break;
+            }
+            if (walkrc != RETURN_OK) {
                 rc = RETURN_ERROR;
             }
         } else if (fn != NULL) {
             if (fn(args, arc, (STRPTR)childpath, fib, ud) != RETURN_OK) {
                 rc = RETURN_ERROR;
             }
+        }
+        if (lhx_check_break()) {
+            Printf("LhX: *** Break\n", 0);
+            Flush(Output());
+            rc = RETURN_WARN;
+            break;
         }
         ok = LhExNext(lock, fib);
     }
@@ -148,6 +159,7 @@ LONG lhx_cmd_list(struct LhxArgs *args)
 {
     struct LhArchive *arc;
     struct lhx_list_ud st;
+    LONG walkrc;
 
     arc = lhx_open_archive(args->archive, LHARC_MODE_READ, args->password);
     if (!arc) {
@@ -156,8 +168,11 @@ LONG lhx_cmd_list(struct LhxArgs *args)
     }
     st.count = 0;
     st.blocks = 0;
-    lhx_walk_entries(arc, (STRPTR)"", args, lhx_list_one, (APTR)&st);
+    walkrc = lhx_walk_entries(arc, (STRPTR)"", args, lhx_list_one, (APTR)&st);
     LhCloseArchive(arc);
+    if (walkrc == RETURN_WARN) {
+        return RETURN_WARN;
+    }
     if (!args->quiet) {
         if (st.count == 0 && args->files && args->files[0]) {
             Printf("No match found\n", 0);
@@ -267,6 +282,7 @@ LONG lhx_cmd_extract(struct LhxArgs *args, LONG with_paths)
 {
     struct LhArchive *arc;
     struct lhx_fail_ud st;
+    LONG walkrc;
 
     lhx_dbg_s((STRPTR)"cmd", (STRPTR)"EXTRACT");
     lhx_dbg_l((STRPTR)"with_paths", with_paths);
@@ -278,8 +294,12 @@ LONG lhx_cmd_extract(struct LhxArgs *args, LONG with_paths)
     }
     st.fail = 0;
     st.with_paths = with_paths;
-    lhx_walk_entries(arc, (STRPTR)"", args, lhx_extract_walk_one, (APTR)&st);
+    walkrc = lhx_walk_entries(arc, (STRPTR)"", args, lhx_extract_walk_one,
+        (APTR)&st);
     LhCloseArchive(arc);
+    if (walkrc == RETURN_WARN) {
+        return RETURN_WARN;
+    }
     return st.fail > 0 ? RETURN_WARN : RETURN_OK;
 }
 
@@ -296,11 +316,19 @@ LONG lhx_cmd_add(struct LhxArgs *args)
     struct FileInfoBlock *fib;
     struct TagItem tags[5];
     ULONG n;
+    STRPTR *files;
+    LONG xerr;
 
     if (!args->files || !args->files[0]) {
         lhx_print_error((STRPTR)"ADD requires FILES", 0);
         return RETURN_FAIL;
     }
+    files = lhx_expand_file_args(args->files, &xerr);
+    if (files == NULL) {
+        return (xerr == ERROR_BREAK) ? RETURN_WARN : RETURN_FAIL;
+    }
+    args->files = files;
+
     testlock = Lock(args->archive, ACCESS_READ);
     if (testlock != (BPTR)NULL) {
         UnLock(testlock);
@@ -320,6 +348,13 @@ LONG lhx_cmd_add(struct LhxArgs *args)
         return RETURN_FAIL;
     }
     for (i = 0; args->files[i] != NULL; i++) {
+        if (lhx_check_break()) {
+            Printf("LhX: *** Break\n", 0);
+            Flush(Output());
+            FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
+            LhCloseArchive(arc);
+            return RETURN_WARN;
+        }
         data = NULL;
         len = 0;
         if (!lhx_read_file(args->files[i], &data, &len)) {
@@ -354,7 +389,7 @@ LONG lhx_cmd_add(struct LhxArgs *args)
         }
         tags[n].ti_Tag = TAG_DONE;
 
-        if (!LhAddEntryTagList(arc, (STRPTR)arcname, data, len, tags)) {
+        if (!LhAddEntryA(arc, (STRPTR)arcname, data, len, tags)) {
             lhx_print_error((STRPTR)"add failed", LhErr());
             if (data) {
                 FreeMem(data, (ULONG)len);
@@ -400,6 +435,7 @@ LONG lhx_cmd_test(struct LhxArgs *args)
 {
     struct LhArchive *arc;
     struct lhx_test_ud st;
+    LONG walkrc;
 
     lhx_dbg_s((STRPTR)"cmd", (STRPTR)"TEST");
     arc = lhx_open_archive(args->archive, LHARC_MODE_READ, args->password);
@@ -409,12 +445,15 @@ LONG lhx_cmd_test(struct LhxArgs *args)
         return RETURN_FAIL;
     }
     st.fail = 0;
-    if (lhx_walk_entries(arc, (STRPTR)"", args, lhx_test_walk_one, (APTR)&st)
-        != RETURN_OK || st.fail > 0) {
-        LhCloseArchive(arc);
+    walkrc = lhx_walk_entries(arc, (STRPTR)"", args, lhx_test_walk_one,
+        (APTR)&st);
+    LhCloseArchive(arc);
+    if (walkrc == RETURN_WARN) {
+        return RETURN_WARN;
+    }
+    if (walkrc != RETURN_OK || st.fail > 0) {
         return RETURN_FAIL;
     }
-    LhCloseArchive(arc);
     return RETURN_OK;
 }
 
@@ -435,18 +474,21 @@ static LONG lhx_print_walk_one(struct LhxArgs *args, struct LhArchive *arc,
 LONG lhx_cmd_print(struct LhxArgs *args)
 {
     struct LhArchive *arc;
+    LONG walkrc;
 
     arc = lhx_open_archive(args->archive, LHARC_MODE_READ, args->password);
     if (!arc) {
         lhx_print_error((STRPTR)"cannot open archive", LhErr());
         return RETURN_FAIL;
     }
-    if (lhx_walk_entries(arc, (STRPTR)"", args, lhx_print_walk_one, NULL)
-        != RETURN_OK) {
-        LhCloseArchive(arc);
+    walkrc = lhx_walk_entries(arc, (STRPTR)"", args, lhx_print_walk_one, NULL);
+    LhCloseArchive(arc);
+    if (walkrc == RETURN_WARN) {
+        return RETURN_WARN;
+    }
+    if (walkrc != RETURN_OK) {
         return RETURN_FAIL;
     }
-    LhCloseArchive(arc);
     Flush(Output());
     return RETURN_OK;
 }

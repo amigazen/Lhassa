@@ -13,7 +13,7 @@
 #include "lha_internal.h"
 
 #ifdef __AMIGADATE__
-const char version_tag[] = "\0$VER: Lhassa 2.15 (02.07.26)";
+const char version_tag[] = "\0$VER: LhASsA 2.15 (02.07.26)";
 const char stack_cookie[] = "$STACK: 65536";
 #endif
 

@@ -5,21 +5,20 @@
  *
  * LhTest.c - Standalone lh.library smoke / regression harness.
  *
- * Exercises every public LVO from SDK/SFD/lh_lib.sfd (32 functions):
+ * Exercises every public LVO from SDK/SFD/lh_lib.sfd (31 functions):
  *
  *   CreateBuffer, DeleteBuffer, LhEncode, LhDecode, LhCompress, LhDecompress,
  *   LhOpenArchive, LhCloseArchive, LhLock, LhUnLock, LhExamine, LhExNext,
  *   LhExAll, LhExAllEnd, LhInfo, LhOpenFromLock, LhOpen, LhRead, LhWrite,
- *   LhClose, LhSeek, LhNameFromLock, LhAddEntry, LhAddEntryTagList,
+ *   LhClose, LhSeek, LhNameFromLock, LhAddEntryA,
  *   LhDeleteFile, LhConcatArchive, LhSetPassword, LhReadData, LhExtractEntry,
  *   LhTestEntry, LhPrintEntry, LhErr.
- *   (LhAddEntryTags is the ==varargs alias of LhAddEntryTagList, same LVO.)
+ *   (LhAddEntry is the ==varargs alias of LhAddEntryA, same LVO.)
  *
- * Fixture entries are added with LH0 via LhAddEntryTagList (same as the
- * current LhAddEntry default) so payload round-trips stay deterministic.
- * Add coverage includes multi-KB in-memory LhAddEntry and an LhX-style
- * on-disk file with SetProtection/SetComment, TagList add, extract, and
- * Examine of the restored protection bits and filenote.
+ * Fixture entries are added with LH0 via LhAddEntryA so payload round-trips
+ * stay deterministic.  Add coverage includes multi-KB in-memory LhAddEntryA
+ * and an LhX-style on-disk file with SetProtection/SetComment, TagList add,
+ * extract, and Examine of the restored protection bits and filenote.
  *
  * Flow: classic buffer -> add round-trips -> create fixture -> read APIs
  * -> mutate -> verify.
@@ -116,8 +115,8 @@ lt_end(BOOL ok, STRPTR actual)
 static VOID
 lt_print_api_plan(VOID)
 {
-    Printf("LhTest: plan - all 32 public LVOs from SDK/SFD/lh_lib.sfd\n");
-    Printf("LhTest:   (+ LhAddEntryTags varargs alias of LhAddEntryTagList)\n");
+    Printf("LhTest: plan - all 31 public LVOs from SDK/SFD/lh_lib.sfd\n");
+    Printf("LhTest:   (+ LhAddEntry varargs alias of LhAddEntryA)\n");
     Flush(Output());
 }
 
@@ -128,7 +127,7 @@ lt_lherr_detail(char *buf, LONG bufsz)
 }
 
 /*
- * Add with LH0 + attrs 0 via LhAddEntryTagList (explicit method tag).
+ * Add with LH0 + attrs 0 via LhAddEntryA (explicit method tag).
  */
 static BOOL
 lt_add_store(struct LhArchive *arc, STRPTR name, APTR data, LONG len)
@@ -140,7 +139,7 @@ lt_add_store(struct LhArchive *arc, STRPTR name, APTR data, LONG len)
     tags[1].ti_Tag = LHADD_Attrs;
     tags[1].ti_Data = 0UL;
     tags[2].ti_Tag = TAG_DONE;
-    return LhAddEntryTagList(arc, name, data, len, tags) ? TRUE : FALSE;
+    return LhAddEntryA(arc, name, data, len, tags) ? TRUE : FALSE;
 }
 
 /*
@@ -454,7 +453,7 @@ lt_write_archive(STRPTR path, STRPTR name_a, STRPTR data_a, ULONG len_a,
     lt_end(TRUE, path);
 
     sprintf(expect, "DOSTRUE for %s", (const char *)name_a);
-    lt_begin((STRPTR)"LhAddEntryTagList", (STRPTR)expect);
+    lt_begin((STRPTR)"LhAddEntryA", (STRPTR)expect);
     if (!lt_add_store(arc, name_a, (APTR)data_a, (LONG)len_a)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
@@ -464,7 +463,7 @@ lt_write_archive(STRPTR path, STRPTR name_a, STRPTR data_a, ULONG len_a,
     lt_end(TRUE, name_a);
 
     sprintf(expect, "DOSTRUE for %s", (const char *)name_b);
-    lt_begin((STRPTR)"LhAddEntryTagList", (STRPTR)expect);
+    lt_begin((STRPTR)"LhAddEntryA", (STRPTR)expect);
     if (!lt_add_store(arc, name_b, (APTR)data_b, (LONG)len_b)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
@@ -551,12 +550,12 @@ lt_test_addentry_default(VOID)
     char expect[48];
 
     /*
-     * In-memory LhAddEntry with a multi-KB payload (not a 1-byte smoke).
+     * In-memory LhAddEntryA with a multi-KB payload (not a 1-byte smoke).
      * Catches store/header issues that a single-byte add would miss.
      */
     mem_len = 2048UL;
     sprintf(expect, "round-trip %lu bytes", (unsigned long)mem_len);
-    lt_begin((STRPTR)"LhAddEntry", (STRPTR)expect);
+    lt_begin((STRPTR)"LhAddEntryA", (STRPTR)expect);
     if (!lt_ensure_dir((STRPTR)LT_RAMDIR)) {
         lt_end(FALSE, (STRPTR)"mkdir failed");
         return;
@@ -577,7 +576,7 @@ lt_test_addentry_default(VOID)
         lt_end(FALSE, (STRPTR)detail);
         return;
     }
-    if (!LhAddEntry(arc, (STRPTR)"plain.bin", (APTR)mem_payload, (LONG)mem_len)) {
+    if (!LhAddEntryA(arc, (STRPTR)"plain.bin", (APTR)mem_payload, (LONG)mem_len, NULL)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
         FreeMem(mem_payload, mem_len);
@@ -618,7 +617,7 @@ lt_test_addentry_default(VOID)
      * TagList add, content round-trip, then extract and Examine metadata.
      */
     sprintf(expect, "disk %ld bytes + FIB tags", (long)LT_ADD_SIZE);
-    lt_begin((STRPTR)"LhAddEntryTagList(disk)", (STRPTR)expect);
+    lt_begin((STRPTR)"LhAddEntryA(disk)", (STRPTR)expect);
     lt_remove_path((STRPTR)LT_ADD_SRC);
     lt_remove_path((STRPTR)LT_ADD_ARC);
     disk_data = AllocMem((ULONG)LT_ADD_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
@@ -724,7 +723,7 @@ lt_test_addentry_default(VOID)
         UnLock(flock);
     }
     tags[n].ti_Tag = TAG_DONE;
-    if (!LhAddEntryTagList(arc, (STRPTR)LT_ADD_ENTRY, disk_data, disk_len, tags)) {
+    if (!LhAddEntryA(arc, (STRPTR)LT_ADD_ENTRY, disk_data, disk_len, tags)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
         FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
@@ -1544,7 +1543,7 @@ lt_test_mutate(STRPTR path)
     }
     lt_end(TRUE, path);
 
-    lt_begin((STRPTR)"LhAddEntryTagList(append)", (STRPTR)"DOSTRUE for LtExtra.txt");
+    lt_begin((STRPTR)"LhAddEntryA(append)", (STRPTR)"DOSTRUE for LtExtra.txt");
     if (!lt_add_store(arc, (STRPTR)LT_ENTRY_C, (APTR)lt_plain_c, (LONG)len_c)) {
         lt_lherr_detail(detail, (LONG)sizeof(detail));
         LhCloseArchive(arc);
@@ -1789,7 +1788,7 @@ lt_print_archive_skip(VOID)
     Printf("LhTest: SKIP 25 archive LVOs (fixture create failed):\n");
     Printf("  LhOpenArchive LhCloseArchive LhLock LhUnLock LhExamine LhExNext\n");
     Printf("  LhExAll LhExAllEnd LhInfo LhOpenFromLock LhOpen LhRead LhWrite\n");
-    Printf("  LhClose LhSeek LhNameFromLock LhAddEntry LhAddEntryTagList\n");
+    Printf("  LhClose LhSeek LhNameFromLock LhAddEntryA\n");
     Printf("  LhDeleteFile LhConcatArchive LhSetPassword LhReadData\n");
     Printf("  LhExtractEntry LhTestEntry LhPrintEntry LhErr\n");
     Flush(Output());

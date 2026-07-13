@@ -25,9 +25,8 @@ lh.library/LhWrite
 lh.library/LhClose
 lh.library/LhSeek
 lh.library/LhNameFromLock
+lh.library/LhAddEntryA
 lh.library/LhAddEntry
-lh.library/LhAddEntryTagList
-lh.library/LhAddEntryTags
 lh.library/LhDeleteFile
 lh.library/LhConcatArchive
 lh.library/LhSetPassword
@@ -175,7 +174,7 @@ lh.library/LhErr
    LHARC_MODE_WRITE   MODE_NEWFILE  -- create/truncate archive for write
    LHARC_MODE_APPEND  1007L         -- append entries to existing archive
 
-   LHADD_* TAGS (LhAddEntryTagList / LhAddEntryTags)
+   LHADD_* TAGS (LhAddEntryA / LhAddEntry)
 
    LHADD_Method     (TAG_USER+1) -- compression level (0=store, 5=lh5, ...)
    LHADD_Attrs      (TAG_USER+2) -- Amiga protection bits
@@ -285,7 +284,7 @@ lh.library/LhErr
        The destination must be at least lh_SrcSize + ENCODEEXTRA(lh_SrcSize)
        bytes.  lh_Src and lh_Dst must not overlap.
 
-       Lhassa uses standard LHA lh5 compression (not the 1990 proprietary
+       LhASsA uses standard LHA lh5 compression (not the 1990 proprietary
        Lh format).  On success, lh_DstSize is updated to the compressed size.
 
    INPUTS
@@ -1027,67 +1026,27 @@ lh.library/LhErr
 
    SEE ALSO
        LhLock(), dos.library/NameFromLock
-lh.library/LhAddEntry                                 lh.library/LhAddEntry
+lh.library/LhAddEntryA                               lh.library/LhAddEntryA
 
    NAME
-       LhAddEntry -- Add a file entry to a writable archive  (V2)
+       LhAddEntryA -- Add a file entry to a writable archive  (V2)
 
    SYNOPSIS
-       success = LhAddEntry(Archive, Name, Data, DataLen);
-       D0                   A0       A1    A2    D0
+       success = LhAddEntryA(Archive, Name, Data, DataLen, TagList);
+       D0                    A0       A1    A2    D0       A3
 
-       LONG LhAddEntry(struct LhArchive *Archive, STRPTR Name, APTR Data,
-           LONG DataLen);
+       LONG LhAddEntryA(struct LhArchive *Archive, STRPTR Name,
+           APTR Data, LONG DataLen, struct TagItem *TagList);
 
    FUNCTION
        Appends Name with payload Data (DataLen bytes) to Archive.  Archive
        must be opened with LHARC_MODE_WRITE or LHARC_MODE_APPEND.
 
        Defaults: header level 2 (path extension type 2 for nested names
-       such as LIBS/foo.library), LH5 compression, Amiga attribute
+       such as LIBS/foo.library), LH0/store, Amiga attribute
        LH_ATTR_DEFAULT (0 = ----rwed), and the current DateStamp.  Basename
-       "Manifest" is stored as LH0.  For method/attrs/date/comment
-       overrides, use LhAddEntryTagList() or LhAddEntryTags().
-
-   INPUTS
-       Archive - archive opened for write or append.
-       Name    - entry path within the archive (may contain '/').
-       Data    - payload bytes (may be NULL only if DataLen is 0).
-       DataLen - payload length in bytes.
-
-   RESULT
-       success - DOSTRUE on success, DOSFALSE on failure.
-
-   EXAMPLE
-
-       static STRPTR payload = (STRPTR)"hello";
-
-       arc = LhOpenArchive("RAM:New.lha", LHARC_MODE_WRITE);
-       LhAddEntry(arc, "greeting.txt", payload, 5L);
-       LhCloseArchive(arc);
-
-   NOTES
-
-   BUGS
-
-   SEE ALSO
-       LhAddEntryTagList(), LhAddEntryTags(), LhOpenArchive(),
-       LhDeleteFile(), LhConcatArchive()
-lh.library/LhAddEntryTagList                    lh.library/LhAddEntryTagList
-
-   NAME
-       LhAddEntryTagList -- Add a file entry with a TagItem list  (V2)
-
-   SYNOPSIS
-       success = LhAddEntryTagList(Archive, Name, Data, DataLen, TagList);
-       D0                          A0       A1    A2    D0       A3
-
-       LONG LhAddEntryTagList(struct LhArchive *Archive, STRPTR Name,
-           APTR Data, LONG DataLen, struct TagItem *TagList);
-
-   FUNCTION
-       Same as LhAddEntry(), but TagList may override compression method,
-       Amiga protection bits, DateStamp, and filenote comment.
+       "Manifest" is stored as LH0.  TagList may override compression
+       method, Amiga protection bits, DateStamp, and filenote comment.
 
        Nested names (e.g. LIBS/foo.library) are written as header level 2
        with filename extension type 1 and path extension type 2 (0xFF
@@ -1096,9 +1055,9 @@ lh.library/LhErr
 
    INPUTS
        Archive - archive opened for write or append.
-       Name    - entry path (may contain '/').
-       Data    - payload bytes (NULL only if DataLen is 0).
-       DataLen - payload length.
+       Name    - entry path within the archive (may contain '/').
+       Data    - payload bytes (may be NULL only if DataLen is 0).
+       DataLen - payload length in bytes.
        TagList - optional TagItem list ending in TAG_DONE, or NULL.
 
        LHADD_Method    (TAG_USER+1)  compression level (0=store, 5=lh5, ...)
@@ -1111,8 +1070,12 @@ lh.library/LhErr
 
    EXAMPLE
 
+       static STRPTR payload = (STRPTR)"hello";
        struct TagItem tags[4];
        struct DateStamp ds;
+
+       arc = LhOpenArchive("RAM:New.lha", LHARC_MODE_WRITE);
+       LhAddEntryA(arc, "greeting.txt", payload, 5L, NULL);
 
        DateStamp(&ds);
        tags[0].ti_Tag = LHADD_Attrs;
@@ -1122,41 +1085,42 @@ lh.library/LhErr
        tags[2].ti_Tag = LHADD_Comment;
        tags[2].ti_Data = (ULONG)"built by lh-handler";
        tags[3].ti_Tag = TAG_DONE;
-       LhAddEntryTagList(arc, "LIBS/foo.library", data, len, tags);
+       LhAddEntryA(arc, "LIBS/foo.library", data, len, tags);
+       LhCloseArchive(arc);
 
    NOTES
-       Without TagList, behaviour matches LhAddEntry() (LH5, Manifest→LH0).
-       LhAddEntryTags() is the ==varargs alias for this LVO.
+       LhAddEntry() is the ==varargs alias for this LVO.
 
    BUGS
 
    SEE ALSO
-       LhAddEntry(), LhAddEntryTags(), LhExtractEntry(), lh.library/constants
-lh.library/LhAddEntryTags                          lh.library/LhAddEntryTags
+       LhAddEntry(), LhOpenArchive(), LhDeleteFile(), LhConcatArchive(),
+       LhExtractEntry(), lh.library/constants
+lh.library/LhAddEntry                                 lh.library/LhAddEntry
 
    NAME
-       LhAddEntryTags -- Varargs form of LhAddEntryTagList  (V2)
+       LhAddEntry -- Varargs form of LhAddEntryA  (V2)
 
    SYNOPSIS
-       success = LhAddEntryTags(Archive, Name, Data, DataLen,
-                                firstTag, ...);
-       D0                       A0       A1    A2    D0
+       success = LhAddEntry(Archive, Name, Data, DataLen,
+                            firstTag, ...);
+       D0                   A0       A1    A2    D0
 
-       LONG LhAddEntryTags(struct LhArchive *Archive, STRPTR Name,
+       LONG LhAddEntry(struct LhArchive *Archive, STRPTR Name,
            APTR Data, LONG DataLen, Tag firstTag, ...);
 
    FUNCTION
-       Same LVO as LhAddEntryTagList() (SFD ==varargs).  Not a separate
+       Same LVO as LhAddEntryA() (SFD ==varargs).  Not a separate
        FuncTab entry; SAS/C exposes it via #pragma tagcall.
 
    EXAMPLE
 
-       LhAddEntryTags(arc, "readme.txt", data, len,
+       LhAddEntry(arc, "readme.txt", data, len,
            LHADD_Comment, (ULONG)"note",
            TAG_DONE);
 
    SEE ALSO
-       LhAddEntryTagList(), LhAddEntry()
+       LhAddEntryA()
 lh.library/LhDeleteFile                               lh.library/LhDeleteFile
 
    NAME

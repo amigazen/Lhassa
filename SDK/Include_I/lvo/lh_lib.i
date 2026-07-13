@@ -35,14 +35,13 @@ _LVOLhWrite equ -138
 _LVOLhClose equ -144
 _LVOLhSeek equ -150
 _LVOLhNameFromLock equ -156
-_LVOLhAddEntry equ -162
-_LVOLhAddEntryTagList equ -168
-_LVOLhDeleteFile equ -174
-_LVOLhConcatArchive equ -180
-_LVOLhSetPassword equ -186
-_LVOLhReadData equ -192
-_LVOLhExtractEntry equ -198
-_LVOLhTestEntry equ -204
-_LVOLhPrintEntry equ -210
-_LVOLhErr equ -216
+_LVOLhAddEntryA equ -162
+_LVOLhDeleteFile equ -168
+_LVOLhConcatArchive equ -174
+_LVOLhSetPassword equ -180
+_LVOLhReadData equ -186
+_LVOLhExtractEntry equ -192
+_LVOLhTestEntry equ -198
+_LVOLhPrintEntry equ -204
+_LVOLhErr equ -210
 

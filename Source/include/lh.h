@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2026 amigazen project
  *
- * lh.h - Public API for Lhassa LHA archive read/write.
+ * lh.h - Public API for LhASsA LHA archive read/write.
  */
 
 #ifndef LH_H

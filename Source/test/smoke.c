@@ -24,7 +24,7 @@ static void expect_ok(const char *label, lh_status st)
 
 static void test_codec_roundtrip(void)
 {
-    const char *plain = "Lhassa smoke test payload for lh5 roundtrip.";
+    const char *plain = "LhASsA smoke test payload for lh5 roundtrip.";
     unsigned char out[4096];
     unsigned char back[512];
     size_t out_len;

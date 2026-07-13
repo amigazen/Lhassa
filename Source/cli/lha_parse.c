@@ -29,7 +29,7 @@ void lha_usage(const char *prog)
     fputs("Copyright (c) 1991-94 by Stefan Boberg.\n", stderr);
     fputs("Copyright (c) 1998,1999 by Jim Cooper and David Tritscher.\n", stderr);
     fputs("Copyright (c) 2004-2011 by Sven Ottemann.\n", stderr);
-    fputs("Port Lhassa (c) 2026 amigazen project.\n\n", stderr);
+    fputs("Port LhASsA (c) 2026 amigazen project.\n\n", stderr);
     fprintf(stderr,
         "Usage: %s [-<options>] <command> <archive[.LZH/LHA]> [[homedir]\n"
         "           <filespec>...] [@file] [destdir]\n\n", prog);

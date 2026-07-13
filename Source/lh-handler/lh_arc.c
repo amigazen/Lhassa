@@ -439,7 +439,7 @@ static int lhh_arc_commit_write(GD gd, struct LhHArc *ha, const char *entry,
         (void)lhh_arc_refresh(gd, ha, err);
         return 0;
     }
-    ok = LhAddEntry(warc, (STRPTR)entry, data, len);
+    ok = LhAddEntryA(warc, (STRPTR)entry, data, len, NULL);
     LhCloseArchive(warc);
     if (!ok) {
         DB2("commit write AddEntry fail entry=%s err=%ld\n",
@@ -2148,9 +2148,9 @@ static LONG lhh_arc_rename_one(GD gd, struct LhHArc *ha, const char *oldn,
         tags[0].ti_Tag = LHADD_Directory;
         tags[0].ti_Data = 1;
         tags[1].ti_Tag = TAG_DONE;
-        ok = LhAddEntryTagList(warc, (STRPTR)newn, NULL, 0, tags);
+        ok = LhAddEntryA(warc, (STRPTR)newn, NULL, 0, tags);
     } else {
-        ok = LhAddEntry(warc, (STRPTR)newn, data, len);
+        ok = LhAddEntryA(warc, (STRPTR)newn, data, len, NULL);
     }
     LhCloseArchive(warc);
     if (data != NULL) {
@@ -2550,7 +2550,7 @@ struct LhHLock *lhh_create_dir_name(GD gd, struct LhHLock *parent,
         tags[0].ti_Tag = LHADD_Directory;
         tags[0].ti_Data = 1;
         tags[1].ti_Tag = TAG_DONE;
-        ok = LhAddEntryTagList(warc, (STRPTR)entry, NULL, 0, tags);
+        ok = LhAddEntryA(warc, (STRPTR)entry, NULL, 0, tags);
         LhCloseArchive(warc);
         if (!ok) {
             if (err) {

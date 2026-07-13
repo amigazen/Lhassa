@@ -1,8 +1,8 @@
-# Lhassa
+# LhASsA
 
-**LhArchive system service for Amiga**
+**Lh Archive System services for Amiga**
 
-This is **Lhassa** - an open source implementation of LhA as a system service for Amiga computers. 
+This is **LhASsA** - an open source implementation of LhA as a system service for Amiga computers. 
 
 ## [amigazen project](http://www.amigazen.com)
 
@@ -24,13 +24,13 @@ The amigazen project philosophy is based on openness:
 
 PRs for all projects are gratefully received at [GitHub](https://github.com/amigazen/). While the focus now is on classic 68k software, it is intended that all amigazen project releases can be ported to other Amiga-like systems including AROS and MorphOS where feasible.
 
-Lhassa is distributed under the [BSD 2-Clause License](LICENSE.md).
+LhASsA is distributed under the [BSD 2-Clause License](LICENSE.md).
 
-## About Lhassa
+## About LhASsA
 
 **LhA** (`.lzh` / `.lha`) is the de facto standard archive format on Amiga platforms from the late 1980s through the 1990s until today. Archives use level 0-2 headers, per-file CRC16 checks, and a family of **lh*** compression methods (lh0 store, lh1-lh7, lzs, lz4, lz5, and others).
 
-**Lhassa** (`lh.lib` + `lha` CLI + `lh.library`) recreates that format in pure **ANSI C (C89)** targeting especially vbcc on 68k AmigaOS but compatible with any recent C compiler on any platform. The `LhA` command included implements the same options as Amiga **LhA 2.15** : `a` adds files, `x` / `e` extract (with or without paths), `l` / `v` list. The library (`liblh.a`, public header `lh.h`) exposes read/write APIs for embedding LhArchive support in other programs.
+**LhASsA** (`lh.lib` + `lha` CLI + `lh.library`) recreates that format in pure **ANSI C (C89)** targeting especially vbcc on 68k AmigaOS but compatible with any recent C compiler on any platform. The `LhA` command included implements the same options as Amiga **LhA 2.15** : `a` adds files, `x` / `e` extract (with or without paths), `l` / `v` list. The library (`liblh.a`, public header `lh.h`) exposes read/write APIs for embedding LhArchive support in other programs.
 
 **lh.library** implements LhArchive as a first class system object - retaining the original four buffer functions (`CreateBuffer`, `DeleteBuffer`, `LhEncode`, `LhDecode`) for backwards compatibility, but now enhanced with a rich API for creating, reading and updating LhA type archives.
 
@@ -84,26 +84,26 @@ Use `a` to create or append to an archive; do not use `c` for that (`c` is conca
 
 ## Version and compatibility
 
-- **CLI banner:** `LhA Lhassa Version 2.15 68000`  -  command-line compatibility target for Amiga LhA 2.15.
+- **CLI banner:** `LhA LhASsA Version 2.15 68000`  -  command-line compatibility target for Amiga LhA 2.15.
 - **Format:** native `.lha` / `.lzh` only. Interchange with archives produced by LhA 2.15, LHa 1.14i, and common PC LHA tools is the design goal for supported methods and header levels.
 
 ## Frequently Asked Questions
 
-### What is the difference between LhA, Lhassa, lh.lib and lh.library?
+### What is the difference between LhA, LhASsA, lh.lib and lh.library?
 
-**LhA** refers to the classic archiver and `.lha` format family. **Lhassa** is the name for this reimplementation. The program presents the **LhA 2.15** banner on the command line to signal CLI compatibility. The portable engine is **liblh** (`liblh.a`, `lh.h`). **lh.library** is the AmigaOS shared-library packaging of that engine, replacing the 1990 lh.library with an LHA-native implementation.
+**LhA** refers to the classic archiver and `.lha` format family. **LhASsA** is the name for this reimplementation. The program presents the **LhA 2.15** banner on the command line to signal CLI compatibility. The portable engine is **liblh** (`liblh.a`, `lh.h`). **lh.library** is the AmigaOS shared-library packaging of that engine, replacing the 1990 lh.library with an LHA-native implementation.
 
-### Does Lhassa replace my old LhA executable?
+### Does LhASsA replace my old LhA executable?
 
 For normal `.lha` / `.lzh` archives, yes  -  use the same commands and options for the implemented subset. Some advanced commands and Amiga integration features are yet to be implemented and are currently no-ops (see below).
 
 ### What about multi-volume archives?
 
-Not implemented. Classic LhA supported multivolume options (`-V`, `-Qv`); Lhassa handles single-file archives only.
+Not implemented. Classic LhA supported multivolume options (`-V`, `-Qv`); LhASsA handles single-file archives only.
 
-### What does Lhassa not implement from classic LhA?
+### What does LhASsA not implement from classic LhA?
 
-Lhassa targets **LHA format compatibility** and a **CLI-compatible front end**. Several LhA 2.15 features are omitted or only stubbed so existing scripts and help text keep working.
+LhASsA targets **LHA format compatibility** and a **CLI-compatible front end**. Several LhA 2.15 features are omitted or only stubbed so existing scripts and help text keep working.
 
 **Commands not yet implemented**
 
@@ -137,7 +137,7 @@ Lhassa targets **LHA format compatibility** and a **CLI-compatible front end**. 
 
 **No-op command-line options**
 
-These switches are parsed and ignored (or only partially honoured) so LhA 2.15 command lines do not fail. They have no effect in Lhassa today unless noted:
+These switches are parsed and ignored (or only partially honoured) so LhA 2.15 command lines do not fail. They have no effect in LhASsA today unless noted:
 
 | Option | Original purpose |
 |--------|------------------|
@@ -178,7 +178,7 @@ These switches are parsed and ignored (or only partially honoured) so LhA 2.15 c
 
 **Partially implemented**
 
-| Option / feature | Lhassa behaviour |
+| Option / feature | LhASsA behaviour |
 |------------------|-----------------|
 | `-q` / `lq` / `vq` | Quiet console output |
 | `-n` / `-N` | Suppress byte / all progress indicators |
@@ -192,7 +192,7 @@ These switches are parsed and ignored (or only partially honoured) so LhA 2.15 c
 | File comments | Preserved on rewrite where present in archive headers |
 | List totals | Archive date on totals line (Amiga `Lock`/`Examine` where available) |
 
-**Lhassa-only extensions**
+**LhASsA-only extensions**
 
 | Option | Purpose |
 |--------|---------|

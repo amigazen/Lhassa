@@ -9,11 +9,14 @@
 #include <exec/types.h>
 #include <exec/execbase.h>
 #include <exec/memory.h>
+#include <exec/tasks.h>
 #include <dos/dos.h>
+#include <dos/dosasl.h>
 #include <dos/datetime.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/utility.h>
+#include <string.h>
 
 #include "lhx_internal.h"
 
@@ -22,6 +25,11 @@ extern struct DosLibrary *DOSBase;
 extern struct Library *UtilityBase;
 
 #define LHX_PATTERN_BUF 512
+#define LHX_EXPAND_MAX  128
+#define LHX_EXPAND_PATH 160
+#ifndef ERROR_BREAK
+#define ERROR_BREAK 304
+#endif
 
 static BPTR lhx_dbg_out(void)
 {
@@ -133,7 +141,8 @@ void lhx_print_error(STRPTR msg, LONG code)
 
 void lhx_print_usage(void)
 {
-    Printf("LhX LIST|EXTRACT|EXTRACTFLAT|ADD|TEST|PRINT ARCHIVE [/files] [TO dir] [QUIET] [FORCE] [PASSWORD pass]\n", 0);
+    Printf("LhX LIST|EXTRACT|EXTRACTFLAT|ADD|TEST|PRINT ARCHIVE [FILES...] [TO dir] [QUIET] [FORCE] [PASSWORD pass]\n", 0);
+    Printf("  FILES may use Amiga wildcards (#? *). Ctrl-C aborts between files.\n", 0);
     Flush(Output());
 }
 
@@ -253,6 +262,7 @@ int lhx_name_matches(STRPTR pattern, STRPTR name)
     UBYTE parsed[LHX_PATTERN_BUF];
     LONG wild;
     LONG matched;
+    STRPTR leaf;
 
     if (!name) {
 #if LHX_DEBUG
@@ -280,6 +290,10 @@ int lhx_name_matches(STRPTR pattern, STRPTR name)
 #endif
         return 1;
     }
+    leaf = FilePart(name);
+    if (leaf != NULL && leaf != name && Stricmp(pattern, leaf) == 0) {
+        return 1;
+    }
     wild = ParsePatternNoCase(pattern, parsed, (LONG)sizeof(parsed));
     if (wild == -1) {
 #if LHX_DEBUG
@@ -289,6 +303,9 @@ int lhx_name_matches(STRPTR pattern, STRPTR name)
         return 0;
     }
     matched = MatchPatternNoCase(parsed, name) ? 1 : 0;
+    if (!matched && leaf != NULL && leaf != name) {
+        matched = MatchPatternNoCase(parsed, leaf) ? 1 : 0;
+    }
 #if LHX_DEBUG
     if (!matched) {
         lhx_dbg_s((STRPTR)"no match pat", pattern);
@@ -316,6 +333,144 @@ int lhx_any_selected(STRPTR name, STRPTR *patterns)
     lhx_dbg_s((STRPTR)"any_selected reject", name);
 #endif
     return 0;
+}
+
+int lhx_check_break(void)
+{
+    if (SetSignal(0L, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) {
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * Expand FILES args with AmigaDOS wildcards (MatchFirst/MatchNext).
+ * Non-wild paths are kept as given.  Returns a static NULL-terminated
+ * list, or NULL on failure (*err set).  Caller must not FreeMem the list.
+ */
+STRPTR *lhx_expand_file_args(STRPTR *patterns, LONG *err)
+{
+    static char expand_bufs[LHX_EXPAND_MAX][LHX_EXPAND_PATH];
+    static STRPTR expand_ptrs[LHX_EXPAND_MAX + 1];
+    LONG n;
+    LONG i;
+    LONG wild;
+    LONG merr;
+    UBYTE parsed[LHX_PATTERN_BUF];
+    struct AnchorPath *ap;
+    ULONG apsize;
+
+    if (err) {
+        *err = 0;
+    }
+    n = 0;
+    if (!patterns) {
+        expand_ptrs[0] = NULL;
+        return expand_ptrs;
+    }
+
+    apsize = (ULONG)sizeof(struct AnchorPath) + (ULONG)LHX_EXPAND_PATH;
+    ap = (struct AnchorPath *)AllocVec(apsize, MEMF_CLEAR);
+    if (ap == NULL) {
+        if (err) {
+            *err = ERROR_NO_FREE_STORE;
+        }
+        return NULL;
+    }
+    ap->ap_BreakBits = SIGBREAKF_CTRL_C;
+    ap->ap_Strlen = (WORD)LHX_EXPAND_PATH;
+
+    for (i = 0; patterns[i] != NULL; i++) {
+        if (lhx_check_break()) {
+            FreeVec(ap);
+            if (err) {
+                *err = ERROR_BREAK;
+            }
+            Printf("LhX: *** Break\n", 0);
+            Flush(Output());
+            return NULL;
+        }
+
+        wild = ParsePatternNoCase(patterns[i], parsed, (LONG)sizeof(parsed));
+        if (wild <= 0) {
+            /* Literal path (or parse error treated as literal). */
+            if (n >= LHX_EXPAND_MAX) {
+                FreeVec(ap);
+                if (err) {
+                    *err = ERROR_NO_FREE_STORE;
+                }
+                lhx_print_error((STRPTR)"too many files after wildcard expand",
+                    0);
+                return NULL;
+            }
+            Strncpy(expand_bufs[n], patterns[i], LHX_EXPAND_PATH);
+            expand_ptrs[n] = (STRPTR)expand_bufs[n];
+            n++;
+            continue;
+        }
+
+        merr = MatchFirst(patterns[i], ap);
+        while (merr == 0) {
+            if (lhx_check_break()) {
+                MatchEnd(ap);
+                FreeVec(ap);
+                if (err) {
+                    *err = ERROR_BREAK;
+                }
+                Printf("LhX: *** Break\n", 0);
+                Flush(Output());
+                return NULL;
+            }
+            /* Files only; skip drawers. */
+            if (ap->ap_Info.fib_DirEntryType < 0) {
+                if (n >= LHX_EXPAND_MAX) {
+                    MatchEnd(ap);
+                    FreeVec(ap);
+                    if (err) {
+                        *err = ERROR_NO_FREE_STORE;
+                    }
+                    lhx_print_error(
+                        (STRPTR)"too many files after wildcard expand", 0);
+                    return NULL;
+                }
+                if (ap->ap_Buf[0] != '\0') {
+                    Strncpy(expand_bufs[n], (STRPTR)ap->ap_Buf,
+                        LHX_EXPAND_PATH);
+                } else {
+                    Strncpy(expand_bufs[n],
+                        (STRPTR)ap->ap_Info.fib_FileName, LHX_EXPAND_PATH);
+                }
+                expand_ptrs[n] = (STRPTR)expand_bufs[n];
+                n++;
+            }
+            merr = MatchNext(ap);
+        }
+        MatchEnd(ap);
+        if (merr != ERROR_NO_MORE_ENTRIES && merr != 0) {
+            /*
+             * No match for this pattern is a warning for ADD; keep going
+             * so other patterns still expand.
+             */
+            if (merr != ERROR_OBJECT_NOT_FOUND) {
+                lhx_print_error(patterns[i], merr);
+            }
+        }
+        /* Reset anchor for next pattern. */
+        memset(ap, 0, (size_t)apsize);
+        ap->ap_BreakBits = SIGBREAKF_CTRL_C;
+        ap->ap_Strlen = (WORD)LHX_EXPAND_PATH;
+    }
+
+    FreeVec(ap);
+    expand_ptrs[n] = NULL;
+    if (n == 0) {
+        if (err) {
+            *err = ERROR_OBJECT_NOT_FOUND;
+        }
+        lhx_print_error((STRPTR)"no files matched", 0);
+        return NULL;
+    }
+    return expand_ptrs;
 }
 
 int lhx_basename(STRPTR path, STRPTR out, LONG outlen)

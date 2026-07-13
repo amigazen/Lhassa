@@ -51,6 +51,11 @@ void lhx_dbg_dump_args(struct LhxArgs *args);
 
 int lhx_name_matches(STRPTR pattern, STRPTR name);
 int lhx_any_selected(STRPTR name, STRPTR *patterns);
+int lhx_check_break(void);
+STRPTR *lhx_expand_file_args(STRPTR *patterns, LONG *err);
+#ifndef ERROR_BREAK
+#define ERROR_BREAK 304
+#endif
 int lhx_basename(STRPTR path, STRPTR out, LONG outlen);
 int lhx_path_join(STRPTR out, LONG outlen, STRPTR dir, STRPTR name);
 int lhx_ensure_parent_dir(STRPTR path);
