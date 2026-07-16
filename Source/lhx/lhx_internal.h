@@ -74,7 +74,10 @@ LONG lhx_cmd_add(struct LhxArgs *args);
 LONG lhx_cmd_test(struct LhxArgs *args);
 LONG lhx_cmd_print(struct LhxArgs *args);
 
-/* Workbench startup: remap project path to LHA: and open as drawer. */
+/*
+ * Workbench startup: if LHA: is mounted, remap to LHA: and open as drawer;
+ * otherwise extract into T:LhX/<archive>/ with a progress window.
+ */
 int lhx_real_to_lha_path(STRPTR real, STRPTR out, LONG outlen);
 LONG lhx_wb_startup(struct WBStartup *wb);
 

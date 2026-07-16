@@ -30,6 +30,25 @@ void lh_set_debug_verbose(int on)
     lh_debug_verbose = on ? 1 : 0;
 }
 
+/*
+ * AmigaDOS uses '/' as the only path separator.  LHA type-2 paths use 0xFF;
+ * MS-DOS / Windows archives (common on Aminet) use '\\'.  Left unchanged,
+ * those characters become literal filename characters and no drawers appear.
+ */
+void lh_normalize_path_seps(char *path)
+{
+    char *p;
+
+    if (path == NULL) {
+        return;
+    }
+    for (p = path; *p != '\0'; p++) {
+        if (*p == '\\' || *p == (char)LH_PATH_SEP) {
+            *p = '/';
+        }
+    }
+}
+
 lh_u32 lh_read_le32(const unsigned char *p)
 {
     return (lh_u32)(
@@ -304,6 +323,27 @@ static lh_status lh_hdr_read_extensions_buf(
         memcpy(combined + dlen, meta->filename, flen + 1u);
         free(meta->filename);
         meta->filename = combined;
+    } else if (dir_len > 0
+        && (meta->filename == NULL || meta->filename[0] == '\0')) {
+        /*
+         * Level-2 -lhd- names often live only in type-0x02 (dir) with an
+         * empty type-0x01 filename block.  Promote the directory path.
+         */
+        free(meta->filename);
+        meta->filename = NULL;
+        dlen = dir_len;
+        while (dlen > 0 && (dirbuf[dlen - 1] == '/' || dirbuf[dlen - 1] == ':')) {
+            dlen--;
+        }
+        if (dlen == 0) {
+            return LH_ERR_BAD_HEADER;
+        }
+        meta->filename = (char *)malloc(dlen + 1u);
+        if (!meta->filename) {
+            return LH_ERR_NO_MEMORY;
+        }
+        memcpy(meta->filename, dirbuf, dlen);
+        meta->filename[dlen] = '\0';
     }
 
     if (ext_total) {
@@ -465,6 +505,27 @@ static lh_status lh_hdr_read_extensions(
         memcpy(combined + dlen, meta->filename, flen + 1u);
         free(meta->filename);
         meta->filename = combined;
+    } else if (dir_len > 0
+        && (meta->filename == NULL || meta->filename[0] == '\0')) {
+        /*
+         * Level-2 -lhd- (and some leaves) carry the name only in the
+         * type-0x02 directory extension; type-0x01 may be empty.
+         */
+        free(meta->filename);
+        meta->filename = NULL;
+        dlen = dir_len;
+        while (dlen > 0 && (dirbuf[dlen - 1] == '/' || dirbuf[dlen - 1] == ':')) {
+            dlen--;
+        }
+        if (dlen == 0) {
+            return LH_ERR_BAD_HEADER;
+        }
+        meta->filename = (char *)malloc(dlen + 1u);
+        if (!meta->filename) {
+            return LH_ERR_NO_MEMORY;
+        }
+        memcpy(meta->filename, dirbuf, dlen);
+        meta->filename[dlen] = '\0';
     }
 
     if (ext_total) {
@@ -728,6 +789,24 @@ static lh_status lh_hdr_read_lhex(lh_stream *io, lh_hdr_meta *meta, unsigned cha
             memcpy(combined + dlen, meta->filename, flen + 1u);
             free(meta->filename);
             meta->filename = combined;
+        } else if (dir_len > 0
+            && (meta->filename == NULL || meta->filename[0] == '\0')) {
+            free(meta->filename);
+            meta->filename = NULL;
+            dlen = dir_len;
+            while (dlen > 0
+                && (dirbuf[dlen - 1] == '/' || dirbuf[dlen - 1] == ':')) {
+                dlen--;
+            }
+            if (dlen == 0) {
+                return LH_ERR_BAD_HEADER;
+            }
+            meta->filename = (char *)malloc(dlen + 1u);
+            if (!meta->filename) {
+                return LH_ERR_NO_MEMORY;
+            }
+            memcpy(meta->filename, dirbuf, dlen);
+            meta->filename[dlen] = '\0';
         }
     }
 

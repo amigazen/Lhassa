@@ -1,0 +1,39 @@
+#
+# Source/load/smakefile - Load (install / ROLLBACK Bin via lh.library)
+#
+# Prerequisite: lh.library built and installed (SDK/Include_h/proto/lh.h).
+#
+
+CC      = sc
+LD      = slink
+RM      = delete force quiet
+
+TARGET  = Load
+OBJS    = load.o load_run.o load_ver.o load_atomic.o
+
+all: $(TARGET)
+
+rebuild: clean all
+
+$(TARGET): $(OBJS)
+	$(LD) FROM sc:lib/c.o $(OBJS) TO $(TARGET) STRIPDEBUG NODEBUG LIB lib:small.lib sc:lib/sc.lib BATCH
+
+load.o: load.c load_internal.h
+	$(CC) DEF=AMIGA load.c OBJNAME=load.o
+
+load_run.o: load_run.c load_internal.h
+	$(CC) DEF=AMIGA load_run.c OBJNAME=load_run.o
+
+load_ver.o: load_ver.c load_internal.h
+	$(CC) DEF=AMIGA load_ver.c OBJNAME=load_ver.o
+
+load_atomic.o: load_atomic.c load_internal.h
+	$(CC) DEF=AMIGA load_atomic.c OBJNAME=load_atomic.o
+
+clean:
+	-$(RM) $(OBJS)
+	-$(RM) $(TARGET)
+	-$(RM) $(TARGET).info
+
+install:
+	copy $(TARGET) C:$(TARGET)

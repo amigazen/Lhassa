@@ -75,6 +75,9 @@ typedef unsigned long lh_u32;
 /* Path components in type-2 extensions are separated by 0xFF. */
 #define LH_PATH_SEP      ((char)0xFF)
 
+/* Convert LHA/MS-DOS separators in a path to Amiga '/' in place. */
+void lh_normalize_path_seps(char *path);
+
 #define LH_BUF_DECODE_AUX 4500u
 #define LH_BUF_ENCODE_AUX 40000u
 

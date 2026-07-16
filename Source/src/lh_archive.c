@@ -499,6 +499,7 @@ static void lh_meta_to_entry(const lh_hdr_meta *meta, lh_entry *entry)
         entry->filename = (char *)malloc(flen + 1);
         if (entry->filename) {
             memcpy(entry->filename, meta->filename, flen + 1);
+            lh_normalize_path_seps(entry->filename);
         }
     }
     if (meta->comment) {

@@ -69,4 +69,17 @@ struct LhArchive;
 #define LHADD_Comment    (TAG_USER + 4)  /* ti_Data = STRPTR filenote */
 #define LHADD_Directory  (TAG_USER + 5)  /* ti_Data = nonzero -> -lhd- directory */
 
+/*
+ * Bin-profile LHA (Handle / Load): reserved LH0 stored member with a
+ * canonical $VER: line for the package.  Not listed in Manifest File:
+ * lines; tools read it via LhReadData(arc, LH_BIN_PACKAGE_VER, ...).
+ */
+#define LH_BIN_PACKAGE_VER "-package.ver"
+
+/*
+ * Bin-profile autoshow text (LhA .displayme convention).  Shown on plain
+ * extract; Load does not install this member (not in Manifest File: lines).
+ */
+#define LH_BIN_AUTOSHOW "Load.displayme"
+
 #endif /* LIBRARIES_LH_H */
