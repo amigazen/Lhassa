@@ -239,6 +239,62 @@ const char *lha_archive_name_for_display(const char *path)
     return path ? path : "";
 }
 
+int lha_is_autoshow_name(const char *filename)
+{
+    size_t n;
+    size_t slen;
+    size_t i;
+    static const char suf[] = ".displayme";
+    const char *p;
+    char a;
+
+    if (!filename) {
+        return 0;
+    }
+    n = strlen(filename);
+    slen = sizeof(suf) - 1;
+    if (n < slen) {
+        return 0;
+    }
+    p = filename + n - slen;
+    for (i = 0; i < slen; i++) {
+        a = p[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (char)(a + ('a' - 'A'));
+        }
+        if (a != suf[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+int lha_autoshow_enabled(void)
+{
+    if (g_opts.noop_no_autoshow) {
+        return 0;
+    }
+    if (g_opts.quiet) {
+        return 0;
+    }
+    if (g_opts.noop_no_progress) {
+        return 0;
+    }
+    return 1;
+}
+
+void lha_autoshow_display(const unsigned char *data, size_t len)
+{
+    if (!data || len == 0) {
+        return;
+    }
+    fwrite(data, 1, len, stdout);
+    if (data[len - 1] != '\n') {
+        fputc('\n', stdout);
+    }
+    fputc('\n', stdout);
+}
+
 static int lha_show_progress(void)
 {
     if (g_opts.quiet || g_opts.noop_no_progress) {

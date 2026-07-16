@@ -243,6 +243,16 @@ static int lh_arc_catalog_add(struct LhArchive *arc, const lh_entry *entry,
         return 0;
     }
     strcpy(name_copy, entry->filename);
+    /* Defence: MS-DOS '\\' / LHA 0xFF must be Amiga '/' for drawer create. */
+    {
+        char *np;
+
+        for (np = name_copy; *np != '\0'; np++) {
+            if (*np == '\\' || (unsigned char)*np == 0xffu) {
+                *np = '/';
+            }
+        }
+    }
     comment_copy = NULL;
     if (entry->comment && entry->comment[0]) {
         comment_copy = (char *)malloc(strlen(entry->comment) + 1);

@@ -73,6 +73,8 @@ typedef struct lha_opts {
     int noop_recurse_archives;
     int noop_add_no_arc;
     int noop_set_arc;
+    int noop_no_autoshow;
+    int noop_delete_autoshow;
 } lha_opts;
 
 typedef struct lha_args {
@@ -114,6 +116,9 @@ lh_status lha_rewrite_archive(
 int lha_run_command(const lha_args *args);
 
 const char *lha_archive_name_for_display(const char *path);
+int lha_is_autoshow_name(const char *filename);
+int lha_autoshow_enabled(void);
+void lha_autoshow_display(const unsigned char *data, size_t len);
 void lha_extract_banner(const char *archive);
 void lha_test_banner(const char *archive);
 void lha_extract_summary(unsigned long count, unsigned long bad);

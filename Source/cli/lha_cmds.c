@@ -341,14 +341,24 @@ static int lha_cmd_extract(const lha_args *args, int with_paths)
         if (name != entry.filename) {
             free(name);
         }
-        if (g_opts.no_execute) {
-            printf("EXTRACT %s\n", outpath);
-            count++;
-        } else if (!lha_write_file(outpath, entry.data, entry.data_len)) {
-            fprintf(stderr, "lha: cannot write %s\n", outpath);
-        } else {
-            lha_apply_file_metadata(outpath, &entry.datetime, entry.attrs);
-            count++;
+        {
+            int is_autoshow;
+
+            is_autoshow = lha_is_autoshow_name(entry.filename);
+            if (is_autoshow && lha_autoshow_enabled()) {
+                lha_autoshow_display(entry.data, entry.data_len);
+            }
+            if (is_autoshow && g_opts.noop_delete_autoshow) {
+                count++;
+            } else if (g_opts.no_execute) {
+                printf("EXTRACT %s\n", outpath);
+                count++;
+            } else if (!lha_write_file(outpath, entry.data, entry.data_len)) {
+                fprintf(stderr, "lha: cannot write %s\n", outpath);
+            } else {
+                lha_apply_file_metadata(outpath, &entry.datetime, entry.attrs);
+                count++;
+            }
         }
         if (!entry.crc_ok) {
             bad++;

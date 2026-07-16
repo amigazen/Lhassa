@@ -1,8 +1,10 @@
 #
-# Source/lhasa/smakefile - LhX (100% Amiga-native lh.library client)
+# Source/lhx/smakefile - LhX (100% Amiga-native lh.library client)
 #
 # dos.library / exec.library / utility.library — no libc string/stdio.
 # Prerequisite: lh.library built and installed (SDK/Include_h/proto/lh.h).
+# BOOPSI helpers (DoMethod, …) come from sc.lib via proto/alib.h.
+# Do not also link amiga.lib — it redefines the same symbols.
 #
 
 
@@ -11,14 +13,14 @@ LD      = slink
 RM      = delete force quiet
 
 TARGET  = LhX
-OBJS    = lhx.o lhx_cmds.o lhx_util.o lhx_wb.o
+OBJS    = lhx.o lhx_cmds.o lhx_util.o lhx_wb.o lhx_gauge.o
 
 all: $(TARGET)
 
 rebuild: clean all
 
 $(TARGET): $(OBJS)
-	$(LD) FROM sc:lib/c.o $(OBJS) TO $(TARGET) STRIPDEBUG NODEBUG LIB lib:small.lib sc:lib/sc.lib BATCH
+	$(LD) FROM sc:lib/c.o $(OBJS) TO $(TARGET) STRIPDEBUG NODEBUG LIB sc:lib/sc.lib BATCH
 
 lhx.o: lhx.c lhx_internal.h
 	$(CC) DEF=AMIGA lhx.c OBJNAME=lhx.o
@@ -29,8 +31,11 @@ lhx_cmds.o: lhx_cmds.c lhx_internal.h
 lhx_util.o: lhx_util.c lhx_internal.h
 	$(CC) DEF=AMIGA lhx_util.c OBJNAME=lhx_util.o
 
-lhx_wb.o: lhx_wb.c lhx_internal.h
+lhx_wb.o: lhx_wb.c lhx_internal.h lhx_gauge.h
 	$(CC) DEF=AMIGA lhx_wb.c OBJNAME=lhx_wb.o
+
+lhx_gauge.o: lhx_gauge.c lhx_gauge.h
+	$(CC) DEF=AMIGA lhx_gauge.c OBJNAME=lhx_gauge.o
 
 clean:
 	-$(RM) $(OBJS)

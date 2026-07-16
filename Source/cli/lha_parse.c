@@ -308,6 +308,9 @@ static int lha_apply_option_char(char c, int has_digit, int digit_val)
     case 'S':
         g_opts.noop_set_arc = has_digit ? (digit_val != 0) : 1;
         break;
+    case 'M':
+        g_opts.noop_no_autoshow = has_digit ? (digit_val != 0) : 1;
+        break;
     case 'a':
     case 'A':
     case 'b':
@@ -320,7 +323,6 @@ static int lha_apply_option_char(char c, int has_digit, int digit_val)
     case 'K':
     case 'L':
     case 'm':
-    case 'M':
     case 'p':
     case 'P':
     case 'V':
@@ -357,7 +359,11 @@ static int lha_apply_option_cluster(const char *opt)
         return 1;
     }
     if (opt[0] == 'Q') {
-        /* Alternate option introducer (-Qa, -Qm, ...): accept as no-op. */
+        if (strcmp(opt, "Qd") == 0) {
+            g_opts.noop_delete_autoshow = 1;
+            return 1;
+        }
+        /* Other -Q* accepted as no-op for Amiga script compatibility. */
         return 1;
     }
 

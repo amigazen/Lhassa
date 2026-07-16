@@ -22,3 +22,11 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+# Acknowledgements
+
+The LhX Workbench progress requester includes Gauge code derived from
+`Gauge.c 1.1 (26.1.97)`, the Style Guide progress requester implementation by
+Olaf `Olsen' Barthel.  The original implementation follows the Amiga User
+Interface Style Guide example and is described by its author as freely
+distributable with no usage restrictions.

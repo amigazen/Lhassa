@@ -212,8 +212,9 @@ int main(int argc, char *argv[])
     }
 
     /*
-     * Workbench: argc == 0 and argv is WBStartup *.  Default-tool launch
-     * for a .lha project remaps the file to LHA: volume, assuming Lh-handler is mounted and calls OpenWorkbenchObject().
+     * Workbench: argc == 0 and argv is WBStartup *.  If LHA: is mounted,
+     * remap the project to LHA: and OpenWorkbenchObject(); otherwise
+     * extract to T:LhX/<archive>/ with a Gauge progress requester.
      */
     if (argc == 0) {
         rc = lhx_wb_startup((struct WBStartup *)argv);
