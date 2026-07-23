@@ -33,7 +33,7 @@ extern struct Library *LhBase;
  * Load installs via Manifest only and never extracts this file.
  */
 static const char handle_bin_autoshow_text[] =
-    "Lhassa Bin package\n"
+    "LhASsA Bin package\n"
     "==================\n"
     "\n"
     "This archive is meant to be installed with Load, not unpacked with\n"
@@ -92,12 +92,27 @@ LONG handle_is_hidden_name(STRPTR name)
 ULONG handle_detect_sys_mode(STRPTR from_path)
 {
     STRPTR leaf;
+    char buf[HANDLE_PATH_LEN];
+    LONG n;
 
     if (!from_path || !from_path[0]) {
         return 0;
     }
-    leaf = FilePart(from_path);
-    if (leaf && Stricmp(leaf, (STRPTR)"SYS") == 0) {
+    /*
+     * Copy and strip a trailing '/' so FilePart("sys/") still yields "sys".
+     * Amiga FilePart on a path ending in '/' can return an empty string.
+     */
+    Strncpy((STRPTR)buf, from_path, HANDLE_PATH_LEN);
+    n = 0;
+    while (buf[n] != '\0') {
+        n++;
+    }
+    while (n > 1 && buf[n - 1] == '/') {
+        n--;
+        buf[n] = '\0';
+    }
+    leaf = FilePart((STRPTR)buf);
+    if (leaf && leaf[0] && Stricmp(leaf, (STRPTR)"SYS") == 0) {
         return HANDLE_MODE_SYS;
     }
     return HANDLE_MODE_APP;
@@ -413,19 +428,38 @@ LONG handle_run(struct HandleArgs *args)
     struct LhArchive *arc;
     char arc_prefix[HANDLE_PATH_LEN];
     LONG count_ok;
-    struct HandleScan scan;
-    char manbuf[HANDLE_MANIFEST_MAX];
+    struct HandleScan *scan;
+    STRPTR manbuf;
     char verbuf[HANDLE_VER_LINE_MAX];
     LONG manlen;
     LONG verlen;
     struct TagItem tags[2];
     struct TagItem store_tags[2];
+    LONG rc;
 
+    /*
+     * HandleScan + Manifest text are far larger than the default stack
+     * ($STACK was 16K; scan alone is ~80K).  Allocate from the heap.
+     */
+    scan = (struct HandleScan *)AllocMem(
+        (ULONG)sizeof(struct HandleScan), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!scan) {
+        handle_print_error((STRPTR)"out of memory (scan)", 0);
+        return RETURN_FAIL;
+    }
+    manbuf = (STRPTR)AllocMem(HANDLE_MANIFEST_MAX, MEMF_PUBLIC | MEMF_CLEAR);
+    if (!manbuf) {
+        FreeMem(scan, (ULONG)sizeof(struct HandleScan));
+        handle_print_error((STRPTR)"out of memory (manifest)", 0);
+        return RETURN_FAIL;
+    }
+
+    rc = RETURN_FAIL;
     arc_prefix[0] = '\0';
     from_lock = Lock(args->from_path, ACCESS_READ);
     if (from_lock == (BPTR)NULL) {
         handle_print_error((STRPTR)"cannot lock FROM directory", IoErr());
-        return RETURN_FAIL;
+        goto out_free;
     }
 
     fib = (struct FileInfoBlock *)AllocMem(
@@ -433,35 +467,35 @@ LONG handle_run(struct HandleArgs *args)
     if (!fib) {
         UnLock(from_lock);
         handle_print_error((STRPTR)"out of memory", 0);
-        return RETURN_FAIL;
+        goto out_free;
     }
     if (!Examine(from_lock, fib) || fib->fib_DirEntryType <= 0) {
         handle_print_error((STRPTR)"FROM must be a directory", IoErr());
         FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
         UnLock(from_lock);
-        return RETURN_FAIL;
+        goto out_free;
     }
     FreeMem(fib, (ULONG)sizeof(struct FileInfoBlock));
     fib = NULL;
 
-    if (!handle_scan_stage(args, &scan)) {
+    if (!handle_scan_stage(args, scan)) {
         UnLock(from_lock);
-        return RETURN_FAIL;
+        goto out_free;
     }
-    if (!handle_build_manifest(&scan, (STRPTR)manbuf, HANDLE_MANIFEST_MAX)) {
+    if (!handle_build_manifest(scan, manbuf, HANDLE_MANIFEST_MAX)) {
         UnLock(from_lock);
         handle_print_error((STRPTR)"cannot build Manifest", 0);
-        return RETURN_FAIL;
+        goto out_free;
     }
     if (!handle_build_out_path(args, args->out_path, HANDLE_PATH_LEN)) {
         UnLock(from_lock);
         handle_print_error((STRPTR)"cannot build output path", 0);
-        return RETURN_FAIL;
+        goto out_free;
     }
-    if (!handle_build_package_ver(&scan, (STRPTR)verbuf, HANDLE_VER_LINE_MAX)) {
+    if (!handle_build_package_ver(scan, (STRPTR)verbuf, HANDLE_VER_LINE_MAX)) {
         UnLock(from_lock);
         handle_print_error((STRPTR)"cannot build package $VER", 0);
-        return RETURN_FAIL;
+        goto out_free;
     }
     manlen = 0;
     while (manbuf[manlen] != '\0') {
@@ -473,7 +507,7 @@ LONG handle_run(struct HandleArgs *args)
     }
     if (!args->quiet) {
         Printf("Handle: %s %s (%ld File: lines",
-            (LONG)scan.name, (LONG)scan.version, scan.nfiles);
+            (LONG)scan->name, (LONG)scan->version, scan->nfiles);
         if (args->sys_mode) {
             Printf(", system", 0);
         } else {
@@ -491,12 +525,12 @@ LONG handle_run(struct HandleArgs *args)
             handle_print_error((STRPTR)"output already exists (use FORCE)", 0);
             Printf("Handle:   %s\n", (LONG)args->out_path);
             Flush(Output());
-            return RETURN_FAIL;
+            goto out_free;
         }
         if (!DeleteFile(args->out_path)) {
             UnLock(from_lock);
             handle_print_error((STRPTR)"cannot delete existing output", IoErr());
-            return RETURN_FAIL;
+            goto out_free;
         }
     }
 
@@ -512,14 +546,14 @@ LONG handle_run(struct HandleArgs *args)
             UnLock(from_lock);
             handle_print_error((STRPTR)"output must be a file, not a volume root",
                 0);
-            return RETURN_FAIL;
+            goto out_free;
         }
         tfp = FilePart(args->out_path);
         if (!tfp || !tfp[0]) {
             UnLock(from_lock);
             handle_print_error((STRPTR)"output must be a file, not a volume root",
                 0);
-            return RETURN_FAIL;
+            goto out_free;
         }
     }
 
@@ -527,7 +561,7 @@ LONG handle_run(struct HandleArgs *args)
     if (!arc) {
         UnLock(from_lock);
         handle_print_error((STRPTR)"cannot create archive", LhErr());
-        return RETURN_FAIL;
+        goto out_free;
     }
 
     store_tags[0].ti_Tag = LHADD_Method;
@@ -540,7 +574,7 @@ LONG handle_run(struct HandleArgs *args)
         UnLock(from_lock);
         DeleteFile(args->out_path);
         handle_print_error((STRPTR)"cannot add -package.ver", LhErr());
-        return RETURN_FAIL;
+        goto out_free;
     }
     if (!args->quiet) {
         Printf("ADD %s\n", (LONG)HANDLE_BIN_PACKAGE_VER);
@@ -554,7 +588,7 @@ LONG handle_run(struct HandleArgs *args)
         UnLock(from_lock);
         DeleteFile(args->out_path);
         handle_print_error((STRPTR)"cannot add Load.displayme", LhErr());
-        return RETURN_FAIL;
+        goto out_free;
     }
     if (!args->quiet) {
         Printf("ADD %s\n", (LONG)HANDLE_BIN_AUTOSHOW);
@@ -567,7 +601,7 @@ LONG handle_run(struct HandleArgs *args)
         UnLock(from_lock);
         DeleteFile(args->out_path);
         handle_print_error((STRPTR)"cannot add Manifest", LhErr());
-        return RETURN_FAIL;
+        goto out_free;
     }
     if (!args->quiet) {
         Printf("ADD Manifest\n", 0);
@@ -599,12 +633,17 @@ LONG handle_run(struct HandleArgs *args)
 
     if (!count_ok) {
         DeleteFile(args->out_path);
-        return RETURN_FAIL;
+        goto out_free;
     }
 
     if (!args->quiet) {
         Printf("Handle: wrote %s\n", (LONG)args->out_path);
         Flush(Output());
     }
-    return RETURN_OK;
+    rc = RETURN_OK;
+
+out_free:
+    FreeMem(manbuf, HANDLE_MANIFEST_MAX);
+    FreeMem(scan, (ULONG)sizeof(struct HandleScan));
+    return rc;
 }

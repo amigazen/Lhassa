@@ -30,8 +30,8 @@ extern struct DosLibrary *DOSBase;
 
 struct Library *LhBase = NULL;
 
-static const char *verstag = "$VER: Handle 1.0 (15.07.2026)\n";
-static const char *stack_cookie = "$STACK: 16384\n";
+static const char *verstag = "$VER: Handle 1.1 (23.07.2026)\n";
+static const char *stack_cookie = "$STACK: 40960\n";
 const long oslibversion = 37L;
 
 #define HANDLE_NARGS 8
